@@ -35,6 +35,7 @@ def spawn_acp_session(
         "thinking": thinking,
         "mode": "run",
         "cleanup": "keep",
+        "sandbox": "inherit",
     }
     if label:
         args["label"] = label

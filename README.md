@@ -112,8 +112,8 @@ Use this when you want the real collaboration loop:
 Current operator recommendation on OpenClaw `2026.3.24`:
 
 - keep `coder.backend = "codex-cli"` as the default config for local-first operation
-- auto-switch long brownfield/task-doc heavy runs to `acp`
 - keep `backend=acp` available as an explicit path when you want native ACP child sessions
+- only enable automatic ACP routing when you explicitly set `coder.auto_switch_to_acp = true`
 - if `sessions_spawn` is used through Gateway HTTP, expose it with `gateway.tools.allow = ["sessions_spawn", "sessions_send"]`
 
 ## Quick Start

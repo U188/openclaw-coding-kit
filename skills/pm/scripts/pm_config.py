@@ -114,6 +114,7 @@ def default_config() -> dict[str, Any]:
             "timeout": 900,
             "thinking": "high",
             "session_key": "main",
+            "auto_switch_to_acp": False,
         },
         "tasklist_name": "选育溯源档案",
         "task_prefix": "T",

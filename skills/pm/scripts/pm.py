@@ -1647,6 +1647,8 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     command_name = str(getattr(args, "command", "") or "")
+    if not getattr(args, "config", "") and hasattr(args, "repo_root") and getattr(args, "repo_root", ""):
+        args.config = str((Path(str(args.repo_root)).expanduser().resolve() / "pm.json"))
     ACTIVE_CONFIG.clear()
     ACTIVE_CONFIG.update(load_config(args.config))
     if hasattr(args, "repo_root") and not getattr(args, "repo_root", ""):

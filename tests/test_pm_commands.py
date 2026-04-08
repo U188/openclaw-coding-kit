@@ -27,18 +27,20 @@ class _FakeApi:
         self.persist_run_calls = 0
         self.last_bundle = {"current_task": {"task_id": "T1"}}
         self.ACTIVE_CONFIG = {}
-
-    def build_coder_context(self, task_id: str = "", task_guid: str = ""):
-        return self.last_bundle, Path("/tmp/coder-context.json")
-
-    def coder_config(self) -> dict:
-        return {
+        self._coder_config = {
             "backend": "codex-cli",
             "agent_id": "codex",
             "timeout": 60,
             "thinking": "high",
             "session_key": "main",
+            "auto_switch_to_acp": False,
         }
+
+    def build_coder_context(self, task_id: str = "", task_guid: str = ""):
+        return self.last_bundle, Path("/tmp/coder-context.json")
+
+    def coder_config(self) -> dict:
+        return dict(self._coder_config)
 
     def build_run_message(self, bundle: dict) -> str:
         return "run message"
@@ -127,6 +129,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
 
     def test_cmd_run_auto_switches_default_codex_cli_to_acp_for_brownfield_bundle(self) -> None:
         api = _FakeApi()
+        api._coder_config["auto_switch_to_acp"] = True
         api.last_bundle = {
             "bootstrap": {"project_mode": "brownfield"},
             "current_task": {
@@ -171,6 +174,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
 
     def test_cmd_run_writes_run_id_from_dispatch_side_effects(self) -> None:
         api = _FakeApi()
+        api._coder_config["auto_switch_to_acp"] = True
         api.last_bundle = {
             "bootstrap": {"project_mode": "brownfield"},
             "current_task": {"task_id": "T3", "description": "desc" * 80},

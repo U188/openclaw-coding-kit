@@ -61,6 +61,43 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(len(task["attachments"]), 1)
             self.assertTrue(any("done locally" in str(item.get("content") or "") for item in task["comments"]))
 
+    def test_repo_root_prefers_target_repo_pm_json_without_explicit_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other_tmp:
+            root = Path(tmp)
+            outside = Path(other_tmp)
+            planning = root / ".planning"
+            planning.mkdir(parents=True)
+            for name in ("PROJECT.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md"):
+                (planning / name).write_text(f"# {name}\n", encoding="utf-8")
+            config = {
+                "repo_root": str(root),
+                "project": {"name": "demo"},
+                "task": {"backend": "local", "tasklist_name": "demo", "prefix": "T", "kind": "task"},
+                "doc": {"backend": "repo", "folder_name": "demo"},
+                "coder": {"backend": "codex-cli", "agent_id": "codex", "timeout": 60, "thinking": "high", "session_key": "main"},
+            }
+            (root / "pm.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(PM_SCRIPT),
+                    "create",
+                    "--repo-root",
+                    str(root),
+                    "--summary",
+                    "Repo root config task",
+                ],
+                cwd=str(outside),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["task_id"], "T1")
+            self.assertEqual(payload["task"]["tasklists"][0]["tasklist_guid"], "local:demo")
+            self.assertTrue(str(payload["context_path"]).startswith(str(root / ".pm")))
+
 
 if __name__ == "__main__":
     unittest.main()

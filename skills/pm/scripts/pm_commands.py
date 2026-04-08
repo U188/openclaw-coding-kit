@@ -606,7 +606,8 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         backend_warnings: list[str] = []
         explicit_backend = bool(str(args.backend or "").strip())
         auto_switched = False
-        if not explicit_backend and backend == "codex-cli":
+        auto_switch_to_acp = bool(coder.get("auto_switch_to_acp"))
+        if not explicit_backend and backend == "codex-cli" and auto_switch_to_acp:
             prefer_acp, prefer_reasons = should_prefer_acp_for_bundle(bundle, message, timeout_seconds)
             if prefer_acp:
                 backend = "acp"
