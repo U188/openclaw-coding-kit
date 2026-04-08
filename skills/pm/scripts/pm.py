@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -584,9 +585,10 @@ def append_state_doc(markdown: str) -> dict[str, Any] | None:
     if doc_backend_name() == "repo":
         state_path = _repo_doc_paths(project_root_path())["state"]
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = state_path.read_text(encoding="utf-8") if state_path.exists() else "# STATE\n"
-        separator = "" if existing.endswith("\n") else "\n"
-        state_path.write_text(existing + separator + cleaned + "\n", encoding="utf-8")
+        with repo_write_lock("state-doc"):
+            existing = state_path.read_text(encoding="utf-8") if state_path.exists() else "# STATE\n"
+            separator = "" if existing.endswith("\n") else "\n"
+            state_path.write_text(existing + separator + cleaned + "\n", encoding="utf-8")
         return {"status": "repo_local_appended", "path": str(state_path)}
     doc = doc_config()
     doc_id = str(doc.get("state_doc_url") or doc.get("state_doc_token") or "").strip()
@@ -1053,6 +1055,59 @@ def write_pm_bundle(name: str, payload: dict[str, Any]) -> Path:
     path = pm_file(name)
     write_repo_json(path, payload)
     return path
+
+
+def write_pm_run_record(payload: dict[str, Any], *, run_id: str = "") -> list[Path]:
+    written: list[Path] = []
+    written.append(write_pm_bundle("last-run.json", payload))
+    normalized_run_id = str(run_id or payload.get("run_id") or "").strip()
+    if normalized_run_id:
+        runs_dir = pm_dir_path() / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_path = runs_dir / f"{normalized_run_id}.json"
+        write_repo_json(run_path, payload)
+        written.append(run_path)
+    return written
+
+
+@contextmanager
+def task_run_lock(task_id: str):
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(task_id or "").lower()).strip("-") or "unknown-task"
+    lock_dir = pm_dir_path() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{normalized}.lock"
+    try:
+        fd = lock_path.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise SystemExit(f"task already running: {task_id or normalized} ({lock_path})") from exc
+    try:
+        fd.write(json.dumps({"task_id": task_id, "pid": Path('/proc/self').resolve().name if Path('/proc/self').exists() else ""}, ensure_ascii=False))
+        fd.flush()
+        yield lock_path
+    finally:
+        fd.close()
+        if lock_path.exists():
+            lock_path.unlink()
+
+
+@contextmanager
+def repo_write_lock(name: str):
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-") or "repo-write"
+    lock_dir = pm_dir_path() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{normalized}.lock"
+    try:
+        fd = lock_path.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise SystemExit(f"write already in progress: {name} ({lock_path})") from exc
+    try:
+        fd.write(json.dumps({"name": name}, ensure_ascii=False))
+        fd.flush()
+        yield lock_path
+    finally:
+        fd.close()
+        if lock_path.exists():
+            lock_path.unlink()
 
 
 def build_planning_bundle(mode: str, *, task_id: str = "", task_guid: str = "", focus: str = "") -> tuple[dict[str, Any], Path]:
@@ -1575,9 +1630,11 @@ def build_cli_api() -> SimpleNamespace:
         task_kind=task_kind,
         task_pool=task_pool,
         task_prefix=task_prefix,
+        task_run_lock=task_run_lock,
         tasklist_name=tasklist_name,
         upload_task_attachments=upload_task_attachments,
         write_pm_bundle=write_pm_bundle,
+        write_pm_run_record=write_pm_run_record,
     )
 
 

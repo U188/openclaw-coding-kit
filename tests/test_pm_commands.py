@@ -7,6 +7,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from contextlib import contextmanager
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,9 @@ class _FakeApi:
         return "run message"
 
     def resolve_effective_task(self, bundle: dict) -> dict:
+        current = bundle.get("current_task") if isinstance(bundle.get("current_task"), dict) else {}
+        if current:
+            return current
         return {"task_id": "T1"}
 
     def build_run_label(self, root: Path, agent_id: str, task_id: str) -> str:
@@ -71,9 +75,19 @@ class _FakeApi:
         self.persist_run_calls += 1
         return {"kind": "run"}
 
+    @contextmanager
+    def task_run_lock(self, task_id: str):
+        self.last_locked_task_id = task_id
+        yield Path(f"/tmp/{task_id}.lock")
+
     def write_pm_bundle(self, name: str, payload: dict) -> None:
         self.last_written_name = name
         self.last_written_payload = payload
+
+    def write_pm_run_record(self, payload: dict, *, run_id: str = "") -> None:
+        self.last_written_name = "last-run.json"
+        self.last_written_payload = payload
+        self.last_written_run_id = run_id
 
 
 class PmCommandsFallbackTest(unittest.TestCase):
@@ -103,8 +117,10 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(api.persist_dispatch_calls, 0)
         self.assertEqual(api.persist_run_calls, 1)
         self.assertIn("fell back to backend=codex-cli", payload["warnings"][0])
+        self.assertEqual(api.last_locked_task_id, "T1")
         self.assertEqual(api.last_written_name, "last-run.json")
         self.assertEqual(api.last_written_payload["backend"], "codex-cli")
+        self.assertEqual(api.last_written_run_id, "")
 
     def test_cmd_run_auto_switches_default_codex_cli_to_acp_for_brownfield_bundle(self) -> None:
         api = _FakeApi()
@@ -144,7 +160,46 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(payload["backend"], "acp")
         self.assertEqual(api.spawn_calls, 1)
         self.assertEqual(api.codex_calls, 0)
+        self.assertEqual(api.last_locked_task_id, "T2")
         self.assertIn("Auto-switched backend from codex-cli to acp", payload["warnings"][0])
+
+    def test_cmd_run_writes_run_id_from_dispatch_side_effects(self) -> None:
+        api = _FakeApi()
+        api.last_bundle = {
+            "bootstrap": {"project_mode": "brownfield"},
+            "current_task": {"task_id": "T3", "description": "desc" * 80},
+            "handoff_contract": {"required_reads": ["pm.json", ".pm/current-context.json", ".pm/bootstrap.json"]},
+        }
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T3",
+            task_guid="",
+            backend="",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        def _spawn_ok(**kwargs):
+            api.spawn_calls += 1
+            return {"status": "accepted", "result": {"payloads": []}}
+
+        def _dispatch_effects(bundle: dict, result: dict, *, agent_id: str, runtime: str) -> dict:
+            api.persist_dispatch_calls += 1
+            return {"runtime": runtime, "kind": "dispatch", "run_id": "run-123", "session_key": "agent:codex:acp:abc"}
+
+        api.spawn_acp_session = _spawn_ok
+        api.persist_dispatch_side_effects = _dispatch_effects
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["run_id"], "run-123")
+        self.assertEqual(api.last_written_run_id, "run-123")
 
 
 if __name__ == "__main__":

@@ -607,18 +607,22 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 backend_warnings.append(
                     "Auto-switched backend from codex-cli to acp for this run: " + "；".join(prefer_reasons)
                 )
-        backend, result, side_effects, backend_runtime_warnings = run_coder_backend(
-            backend=backend,
-            agent_id=agent_id,
-            message=message,
-            cwd=str(api.project_root_path()),
-            timeout_seconds=timeout_seconds,
-            thinking=thinking,
-            session_key=session_key,
-            label=label,
-            bundle=bundle,
-        )
+        with api.task_run_lock(task_id):
+            backend, result, side_effects, backend_runtime_warnings = run_coder_backend(
+                backend=backend,
+                agent_id=agent_id,
+                message=message,
+                cwd=str(api.project_root_path()),
+                timeout_seconds=timeout_seconds,
+                thinking=thinking,
+                session_key=session_key,
+                label=label,
+                bundle=bundle,
+            )
         backend_warnings.extend(backend_runtime_warnings)
+        run_id = ""
+        if isinstance(side_effects, dict):
+            run_id = str(side_effects.get("run_id") or "").strip()
         payload = {
             "coder_context_path": str(path),
             "backend": backend,
@@ -629,9 +633,10 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             "message_preview": message[:1200],
             "result": result,
             "side_effects": side_effects,
+            "run_id": run_id,
             "warnings": backend_warnings,
         }
-        api.write_pm_bundle("last-run.json", payload)
+        api.write_pm_run_record(payload, run_id=run_id)
         return emit(payload)
 
     def cmd_create(args: argparse.Namespace) -> int:
