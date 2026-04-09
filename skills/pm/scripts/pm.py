@@ -1140,7 +1140,12 @@ def start_run_monitor(
     )
     state["cron_session_key"] = str(session_key or "main").strip() or "main"
     job = build_monitor_job(state, monitor_cfg=cfg)
-    add_result = cron_add(job, session_key=state["cron_session_key"])
+    try:
+        add_result = cron_add(job, session_key=state["cron_session_key"])
+    except SystemExit as exc:
+        add_result = {"status": "error", "message": str(exc)}
+    except Exception as exc:  # pragma: no cover - defensive guard for bridge/runtime failures
+        add_result = {"status": "error", "message": str(exc)}
     job_info = add_result.get("job") if isinstance(add_result.get("job"), dict) else {}
     state["cron_job_id"] = str(job_info.get("jobId") or add_result.get("jobId") or "").strip()
     state["status"] = "active" if state["cron_job_id"] else "cron-error"

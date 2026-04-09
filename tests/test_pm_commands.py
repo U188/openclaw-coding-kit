@@ -332,6 +332,29 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(payload["monitor"]["status"], "active")
         self.assertEqual(payload["monitor"]["cron_job_id"], "job-run-1")
 
+    def test_cmd_run_reviewed_starts_monitor_for_codex_cli(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="codex-cli",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run_reviewed"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["backend"], "codex-cli")
+        self.assertEqual(payload["monitor"]["status"], "active")
+        self.assertEqual(payload["monitor"]["backend"], "codex-cli")
+
     def test_cmd_complete_stops_active_monitor(self) -> None:
         api = _FakeApi()
         handlers = build_command_handlers(api)

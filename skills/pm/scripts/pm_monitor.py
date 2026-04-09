@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Any
 
 
+MONITORED_BACKENDS = {"acp", "codex-cli", "openclaw"}
+
+
 def _int_or_default(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -16,9 +19,19 @@ def _monitor_schedule(interval_minutes: int) -> dict[str, Any]:
     return {"kind": "every", "everyMs": minutes * 60 * 1000}
 
 
-def should_start_monitor(*, backend: str, side_effects: dict[str, Any], monitor_cfg: dict[str, Any]) -> bool:
+def _watch_mode(backend: str, side_effects: dict[str, Any]) -> str:
     session_key = str((side_effects or {}).get("session_key") or "").strip()
-    return bool(monitor_cfg.get("enabled")) and str(backend or "").strip() == "acp" and bool(session_key)
+    normalized_backend = str(backend or "").strip()
+    if normalized_backend == "acp" and session_key:
+        return "child-session"
+    return "run-record"
+
+
+def should_start_monitor(*, backend: str, side_effects: dict[str, Any], monitor_cfg: dict[str, Any]) -> bool:
+    if not bool(monitor_cfg.get("enabled")):
+        return False
+    normalized_backend = str(backend or "").strip()
+    return normalized_backend in MONITORED_BACKENDS
 
 
 def build_monitor_state(
@@ -38,6 +51,7 @@ def build_monitor_state(
     run_record_path = root / ".pm" / "runs" / f"{normalized_run_id}.json"
     monitor_path = monitors_dir / f"{normalized_run_id}.json"
     prompt_path = monitors_dir / f"{normalized_run_id}.prompt.txt"
+    watch_mode = _watch_mode(backend, side_effects)
     return {
         "status": "pending-cron",
         "task_id": str(task_id or "").strip(),
@@ -47,6 +61,12 @@ def build_monitor_state(
         "repo_root": str(root),
         "pm_config_path": str(root / "pm.json"),
         "child_session_key": str((side_effects or {}).get("session_key") or "").strip(),
+        "watch_mode": watch_mode,
+        "continuation_contract": {
+            "progress_updates_are_terminal": False,
+            "terminal_states": ["completed", "blocked", "needs-decision"],
+            "source_of_truth": [str(run_record_path), str(monitor_path)],
+        },
         "cron_session_key": "main",
         "cron_job_id": "",
         "cron_schedule": _monitor_schedule(int(monitor_cfg.get("interval_minutes") or 5)),
@@ -63,21 +83,33 @@ def build_monitor_state(
 
 
 def build_monitor_prompt(state: dict[str, Any]) -> str:
-    return "\n".join(
+    prompt_lines = [
+        "You are the PM monitor tick for one PM run.",
+        f"Repo root: {state['repo_root']}",
+        f"Config: {state['pm_config_path']}",
+        f"Run record: {state['run_record_path']}",
+        f"Monitor record: {state['monitor_path']}",
+        f"Cron job id: {state['cron_job_id']}",
+        f"Backend: {state.get('backend', '')}",
+        f"Watch mode: {state.get('watch_mode', 'run-record')}",
+    ]
+    child_session_key = str(state.get("child_session_key") or "").strip()
+    if child_session_key:
+        prompt_lines.append(f"Child session key: {child_session_key}")
+    prompt_lines.extend(
         [
-            "You are the PM monitor tick for one PM run.",
-            f"Repo root: {state['repo_root']}",
-            f"Config: {state['pm_config_path']}",
-            f"Run record: {state['run_record_path']}",
-            f"Monitor record: {state['monitor_path']}",
-            f"Cron job id: {state['cron_job_id']}",
             "Read the config, run record, and monitor record before deciding.",
+            "This monitor exists to enforce continued task progression in code, not to preserve a one-off memory.",
+            "Treat progress updates as non-terminal. Keep pushing until the run reaches a real terminal state.",
+            "Terminal states are: completed, blocked, or needs-decision.",
             "If the run is finalized/completed, remove the cron job and mark the monitor closed.",
             "If review is failed, emit one rerun reminder.",
             "If review is passed but task is not completed, emit one complete reminder.",
+            "If the run is active but stalled, emit one continue reminder.",
             "If nothing changed, reply with NO_REPLY.",
         ]
     )
+    return "\n".join(prompt_lines)
 
 
 def build_monitor_job(state: dict[str, Any], *, monitor_cfg: dict[str, Any]) -> dict[str, Any]:

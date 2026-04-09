@@ -31,7 +31,7 @@ class PmMonitorTest(unittest.TestCase):
         self.assertEqual(merged["interval_minutes"], 9)
         self.assertEqual(merged["auto_stop_on_complete"], True)
 
-    def test_should_start_monitor_only_for_async_acp_runs(self) -> None:
+    def test_should_start_monitor_for_supported_reviewed_backends(self) -> None:
         self.assertEqual(
             should_start_monitor(
                 backend="acp",
@@ -43,6 +43,22 @@ class PmMonitorTest(unittest.TestCase):
         self.assertEqual(
             should_start_monitor(
                 backend="codex-cli",
+                side_effects={},
+                monitor_cfg={"enabled": True},
+            ),
+            True,
+        )
+        self.assertEqual(
+            should_start_monitor(
+                backend="openclaw",
+                side_effects={},
+                monitor_cfg={"enabled": True},
+            ),
+            True,
+        )
+        self.assertEqual(
+            should_start_monitor(
+                backend="unknown-backend",
                 side_effects={},
                 monitor_cfg={"enabled": True},
             ),
@@ -64,7 +80,9 @@ class PmMonitorTest(unittest.TestCase):
             )
         self.assertEqual(state["run_id"], "run-1")
         self.assertEqual(state["child_session_key"], "child-1")
+        self.assertEqual(state["watch_mode"], "child-session")
         self.assertEqual(state["status"], "pending-cron")
+        self.assertEqual(state["continuation_contract"]["progress_updates_are_terminal"], False)
         self.assertTrue(str(state["monitor_path"]).endswith(".pm/monitors/run-1.json"))
 
     def test_build_monitor_prompt_points_to_run_and_monitor_records(self) -> None:
@@ -74,12 +92,17 @@ class PmMonitorTest(unittest.TestCase):
             "run_record_path": "/repo/.pm/runs/run-1.json",
             "monitor_path": "/repo/.pm/monitors/run-1.json",
             "cron_job_id": "job-1",
+            "backend": "codex-cli",
+            "watch_mode": "run-record",
+            "child_session_key": "",
         }
         prompt = build_monitor_prompt(state)
         self.assertIn("Config: /repo/pm.json", prompt)
         self.assertIn("Run record: /repo/.pm/runs/run-1.json", prompt)
         self.assertIn("Monitor record: /repo/.pm/monitors/run-1.json", prompt)
         self.assertIn("Cron job id: job-1", prompt)
+        self.assertIn("Backend: codex-cli", prompt)
+        self.assertIn("Treat progress updates as non-terminal", prompt)
 
     def test_build_monitor_job_uses_agent_turn_cron_payload(self) -> None:
         state = {
@@ -90,6 +113,9 @@ class PmMonitorTest(unittest.TestCase):
             "run_record_path": "/repo/.pm/runs/run-1.json",
             "monitor_path": "/repo/.pm/monitors/run-1.json",
             "cron_job_id": "job-1",
+            "backend": "codex-cli",
+            "watch_mode": "run-record",
+            "child_session_key": "",
         }
         job = build_monitor_job(state, monitor_cfg={"stalled_after_minutes": 20})
         self.assertEqual(job["name"], "pm-monitor-run-1")
