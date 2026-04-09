@@ -18,6 +18,259 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
+    def review_cfg() -> dict[str, Any]:
+        getter = getattr(api, "review_config", None)
+        if callable(getter):
+            value = getter()
+            if isinstance(value, dict):
+                return value
+        defaults = api.default_config()
+        review = defaults.get("review") if isinstance(defaults, dict) else None
+        return review if isinstance(review, dict) else {}
+
+    def review_required_default() -> bool:
+        return bool(review_cfg().get("required"))
+
+    def review_gate_enforced() -> bool:
+        return bool(review_cfg().get("enforce_on_complete"))
+
+    def review_comment_sync_enabled() -> bool:
+        getter = getattr(api, "review_comment_sync_enabled", None)
+        if callable(getter):
+            return bool(getter())
+        return bool(review_cfg().get("sync_comment"))
+
+    def review_state_sync_enabled() -> bool:
+        getter = getattr(api, "review_state_sync_enabled", None)
+        if callable(getter):
+            return bool(getter())
+        return bool(review_cfg().get("sync_state"))
+
+    def clone_run_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+        return dict(record) if isinstance(record, dict) else None
+
+    def load_last_run_record() -> dict[str, Any] | None:
+        return clone_run_record(api.load_json_file(api.pm_file("last-run.json")))
+
+    def load_run_record(run_id: str) -> dict[str, Any] | None:
+        loader = getattr(api, "load_run_record", None)
+        if callable(loader):
+            record = loader(run_id)
+            return clone_run_record(record)
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return None
+        path = api.pm_dir_path() / "runs" / f"{normalized_run_id}.json"
+        return clone_run_record(api.load_json_file(path))
+
+    def resolve_run_record(*, task_id: str = "", task_guid: str = "", run_id: str = "") -> tuple[dict[str, Any], str]:
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            record = load_run_record(normalized_run_id)
+            if not isinstance(record, dict):
+                raise SystemExit(f"run record not found: {normalized_run_id}")
+            return record, normalized_run_id
+        last_run = load_last_run_record()
+        if not isinstance(last_run, dict):
+            raise SystemExit("last-run record not found")
+        normalized_task_id = str(task_id or "").strip()
+        normalized_task_guid = str(task_guid or "").strip()
+        run_task_id = str(last_run.get("task_id") or "").strip()
+        run_task_guid = str(last_run.get("task_guid") or "").strip()
+        if normalized_task_id and run_task_id and normalized_task_id != run_task_id:
+            raise SystemExit(f"last-run record does not match task: {normalized_task_id}")
+        if normalized_task_guid and run_task_guid and normalized_task_guid != run_task_guid:
+            raise SystemExit(f"last-run record does not match task guid: {normalized_task_guid}")
+        resolved_run_id = str(last_run.get("run_id") or "").strip()
+        return last_run, resolved_run_id
+
+    def next_generated_run_id(task_id: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(task_id or "").lower()).strip("-") or "run"
+        return f"run-{slug}-{re.sub(r'[^0-9]', '', api.now_iso())}"
+
+    def review_history(record: dict[str, Any]) -> list[dict[str, Any]]:
+        history = record.get("review_history")
+        if not isinstance(history, list):
+            return []
+        return [dict(item) for item in history if isinstance(item, dict)]
+
+    def build_review_event(*, verdict: str, feedback: str, reviewer: str, reviewed_at: str) -> dict[str, Any]:
+        normalized_verdict = str(verdict or "").strip().lower()
+        return {
+            "verdict": normalized_verdict,
+            "review_status": "passed" if normalized_verdict == "pass" else "failed",
+            "feedback": feedback,
+            "reviewer": reviewer,
+            "reviewed_at": reviewed_at,
+        }
+
+    def sync_review_feedback(task_guid: str, task_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        task_id_text = str(task_id or "").strip()
+        verdict = str(event.get("verdict") or "").strip()
+        feedback = str(event.get("feedback") or "").strip()
+        reviewer = str(event.get("reviewer") or "").strip()
+        reviewed_at = str(event.get("reviewed_at") or "").strip()
+        comment_result = None
+        state_result = None
+        if review_comment_sync_enabled():
+            lines = [f"PM review verdict: {verdict}"]
+            if task_id_text:
+                lines.append(f"任务：{task_id_text}")
+            if reviewer:
+                lines.append(f"Reviewer: {reviewer}")
+            if reviewed_at:
+                lines.append(f"Reviewed at: {reviewed_at}")
+            if feedback:
+                lines.extend(["Feedback:", feedback])
+            comment_result = api.create_task_comment(task_guid, "\n".join(lines))
+        if review_state_sync_enabled():
+            state_lines = ["", "", "## PM Review Update", f"- verdict: {verdict}"]
+            if task_id_text:
+                state_lines.append(f"- 任务：{task_id_text}")
+            if reviewer:
+                state_lines.append(f"- reviewer：{reviewer}")
+            if reviewed_at:
+                state_lines.append(f"- reviewed_at：{reviewed_at}")
+            if feedback:
+                state_lines.extend(["- feedback：", feedback])
+            state_result = api.append_state_doc("\n".join(state_lines))
+        return {"comment_result": comment_result, "state_result": state_result}
+
+    def decorate_run_payload(
+        *,
+        payload: dict[str, Any],
+        review_required: bool,
+        review_status: str,
+        attempt: int,
+        review_round: int,
+        rerun_of_run_id: str = "",
+        review_feedback: str = "",
+        reviewer: str = "",
+        reviewed_at: str = "",
+        review_history_items: list[dict[str, Any]] | None = None,
+        review_bypassed: bool = False,
+        review_bypass_reason: str = "",
+        review_bypassed_at: str = "",
+    ) -> dict[str, Any]:
+        normalized = dict(payload)
+        normalized["review_required"] = bool(review_required)
+        default_status = "pending" if review_required else ""
+        normalized["review_status"] = str(review_status or default_status).strip()
+        normalized["attempt"] = int(attempt or 1)
+        normalized["review_round"] = int(review_round or 1)
+        normalized["review_feedback"] = review_feedback
+        normalized["reviewer"] = reviewer
+        normalized["reviewed_at"] = reviewed_at
+        normalized["review_history"] = [dict(item) for item in (review_history_items or []) if isinstance(item, dict)]
+        normalized["rerun_of_run_id"] = rerun_of_run_id
+        normalized["review_bypassed"] = bool(review_bypassed)
+        normalized["review_bypass_reason"] = review_bypass_reason
+        normalized["review_bypassed_at"] = review_bypassed_at
+        return normalized
+
+    def execute_run(
+        args: argparse.Namespace,
+        *,
+        review_required: bool = False,
+        review_status: str = "",
+        attempt: int | None = None,
+        review_round: int | None = None,
+        rerun_of_run_id: str = "",
+        review_feedback: str = "",
+        reviewer: str = "",
+        reviewed_at: str = "",
+        review_history_items: list[dict[str, Any]] | None = None,
+        bundle_mutator: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        bundle, path = api.build_coder_context(task_id=args.task_id, task_guid=args.task_guid)
+        bundle = dict(bundle)
+        if callable(bundle_mutator):
+            bundle_mutator(bundle)
+        coder = api.coder_config()
+        backend = str(args.backend or coder.get("backend") or "acp").strip() or "acp"
+        agent_id = str(args.agent or coder.get("agent_id") or "codex").strip() or "codex"
+        timeout_seconds = int(args.timeout or coder.get("timeout") or 900)
+        thinking = str(args.thinking or coder.get("thinking") or "high").strip()
+        session_key = str(args.session_key or coder.get("session_key") or "main").strip() or "main"
+        acp_cleanup = api.acp_cleanup_mode_from_coder(coder)
+        message = api.build_run_message(bundle)
+        task = api.resolve_effective_task(bundle)
+        task_id = str(task.get("task_id") or "").strip()
+        label = api.build_run_label(api.project_root_path(), agent_id, task_id)
+        backend_warnings: list[str] = []
+        explicit_backend = bool(str(args.backend or "").strip())
+        auto_switched = False
+        auto_switch_to_acp = bool(coder.get("auto_switch_to_acp"))
+        if not explicit_backend and backend == "codex-cli" and auto_switch_to_acp:
+            prefer_acp, prefer_reasons = should_prefer_acp_for_bundle(bundle, message, timeout_seconds)
+            if prefer_acp:
+                backend = "acp"
+                auto_switched = True
+                backend_warnings.append(
+                    "Auto-switched backend from codex-cli to acp for this run: " + "；".join(prefer_reasons)
+                )
+        with api.task_run_lock(task_id):
+            backend, result, side_effects, backend_runtime_warnings = run_coder_backend(
+                backend=backend,
+                agent_id=agent_id,
+                message=message,
+                cwd=str(api.project_root_path()),
+                timeout_seconds=timeout_seconds,
+                thinking=thinking,
+                session_key=session_key,
+                label=label,
+                bundle=bundle,
+                acp_cleanup=acp_cleanup,
+            )
+        backend_warnings.extend(backend_runtime_warnings)
+        run_id = ""
+        if isinstance(side_effects, dict):
+            run_id = str(side_effects.get("run_id") or "").strip()
+        if not run_id:
+            run_id = next_generated_run_id(task_id)
+        cleanup_plan = api.build_run_cleanup_plan(
+            backend=backend,
+            session_key=session_key,
+            acp_cleanup=acp_cleanup if backend == "acp" else "",
+        )
+        payload = {
+            "coder_context_path": str(path),
+            "backend": backend,
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "task_guid": str(task.get("guid") or "").strip(),
+            "session_key": session_key,
+            "acp_cleanup": acp_cleanup if backend == "acp" else "",
+            "timeout": timeout_seconds,
+            "thinking": thinking,
+            "message_preview": message[:1200],
+            "result": result,
+            "side_effects": side_effects,
+            "run_id": run_id,
+            "cleanup_plan": cleanup_plan,
+            "warnings": backend_warnings,
+            "runtime_banner": build_runtime_banner(
+                backend=backend,
+                agent_id=agent_id,
+                task_id=task_id,
+                auto_switched=auto_switched,
+            ),
+        }
+        payload = decorate_run_payload(
+            payload=payload,
+            review_required=review_required,
+            review_status=review_status,
+            attempt=attempt or 1,
+            review_round=review_round or 1,
+            rerun_of_run_id=rerun_of_run_id,
+            review_feedback=review_feedback,
+            reviewer=reviewer,
+            reviewed_at=reviewed_at,
+            review_history_items=review_history_items or [],
+        )
+        api.write_pm_run_record(payload, run_id=run_id)
+        return payload
+
     def should_prefer_acp_for_bundle(bundle: dict[str, Any], message: str, timeout_seconds: int) -> tuple[bool, list[str]]:
         reasons: list[str] = []
         bootstrap = bundle.get("bootstrap") if isinstance(bundle.get("bootstrap"), dict) else {}
@@ -604,76 +857,17 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         return emit({"bundle_path": str(path), "bundle": payload})
 
     def cmd_run(args: argparse.Namespace) -> int:
-        bundle, path = api.build_coder_context(task_id=args.task_id, task_guid=args.task_guid)
-        coder = api.coder_config()
-        backend = str(args.backend or coder.get("backend") or "acp").strip() or "acp"
-        agent_id = str(args.agent or coder.get("agent_id") or "codex").strip() or "codex"
-        timeout_seconds = int(args.timeout or coder.get("timeout") or 900)
-        thinking = str(args.thinking or coder.get("thinking") or "high").strip()
-        session_key = str(args.session_key or coder.get("session_key") or "main").strip() or "main"
-        acp_cleanup = api.acp_cleanup_mode_from_coder(coder)
-        message = api.build_run_message(bundle)
-        task = api.resolve_effective_task(bundle)
-        task_id = str(task.get("task_id") or "").strip()
-        label = api.build_run_label(api.project_root_path(), agent_id, task_id)
-        backend_warnings: list[str] = []
-        explicit_backend = bool(str(args.backend or "").strip())
-        auto_switched = False
-        auto_switch_to_acp = bool(coder.get("auto_switch_to_acp"))
-        if not explicit_backend and backend == "codex-cli" and auto_switch_to_acp:
-            prefer_acp, prefer_reasons = should_prefer_acp_for_bundle(bundle, message, timeout_seconds)
-            if prefer_acp:
-                backend = "acp"
-                auto_switched = True
-                backend_warnings.append(
-                    "Auto-switched backend from codex-cli to acp for this run: " + "；".join(prefer_reasons)
-                )
-        with api.task_run_lock(task_id):
-            backend, result, side_effects, backend_runtime_warnings = run_coder_backend(
-                backend=backend,
-                agent_id=agent_id,
-                message=message,
-                cwd=str(api.project_root_path()),
-                timeout_seconds=timeout_seconds,
-                thinking=thinking,
-                session_key=session_key,
-                label=label,
-                bundle=bundle,
-                acp_cleanup=acp_cleanup,
-            )
-        backend_warnings.extend(backend_runtime_warnings)
-        run_id = ""
-        if isinstance(side_effects, dict):
-            run_id = str(side_effects.get("run_id") or "").strip()
-        cleanup_plan = api.build_run_cleanup_plan(
-            backend=backend,
-            session_key=session_key,
-            acp_cleanup=acp_cleanup if backend == "acp" else "",
+        payload = execute_run(args)
+        return emit(payload)
+
+    def cmd_run_reviewed(args: argparse.Namespace) -> int:
+        payload = execute_run(
+            args,
+            review_required=review_required_default(),
+            review_status="pending",
+            attempt=1,
+            review_round=1,
         )
-        payload = {
-            "coder_context_path": str(path),
-            "backend": backend,
-            "agent_id": agent_id,
-            "task_id": task_id,
-            "task_guid": str(task.get("guid") or "").strip(),
-            "session_key": session_key,
-            "acp_cleanup": acp_cleanup if backend == "acp" else "",
-            "timeout": timeout_seconds,
-            "thinking": thinking,
-            "message_preview": message[:1200],
-            "result": result,
-            "side_effects": side_effects,
-            "run_id": run_id,
-            "cleanup_plan": cleanup_plan,
-            "warnings": backend_warnings,
-            "runtime_banner": build_runtime_banner(
-                backend=backend,
-                agent_id=agent_id,
-                task_id=task_id,
-                auto_switched=auto_switched,
-            ),
-        }
-        api.write_pm_run_record(payload, run_id=run_id)
         return emit(payload)
 
     def cmd_create(args: argparse.Namespace) -> int:
@@ -775,11 +969,128 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             }
         )
 
+    def cmd_review(args: argparse.Namespace) -> int:
+        task = None
+        if args.task_guid:
+            task = api.get_task_record_by_guid(args.task_guid)
+        elif args.task_id:
+            task = api.get_task_record(args.task_id, include_completed=True)
+        run_record, resolved_run_id = resolve_run_record(
+            task_id=str((task or {}).get("task_id") or args.task_id or "").strip(),
+            task_guid=str((task or {}).get("guid") or args.task_guid or "").strip(),
+            run_id=args.run_id,
+        )
+        task_id = str((task or {}).get("task_id") or run_record.get("task_id") or args.task_id or "").strip()
+        task_guid = str((task or {}).get("guid") or run_record.get("task_guid") or args.task_guid or "").strip()
+        feedback = api.resolve_optional_text_input(args.feedback, args.feedback_file)
+        verdict = str(args.verdict or "").strip().lower()
+        if verdict == "fail" and not feedback:
+            raise SystemExit("review fail requires --feedback or --feedback-file")
+        reviewed_at = api.now_iso()
+        reviewer = str(args.reviewer or "").strip()
+        event = build_review_event(verdict=verdict, feedback=feedback, reviewer=reviewer, reviewed_at=reviewed_at)
+        history = review_history(run_record)
+        history.append(event)
+        updated = decorate_run_payload(
+            payload=run_record,
+            review_required=bool(run_record.get("review_required")),
+            review_status=str(event.get("review_status") or ""),
+            attempt=int(run_record.get("attempt") or 1),
+            review_round=int(run_record.get("review_round") or 1),
+            rerun_of_run_id=str(run_record.get("rerun_of_run_id") or "").strip(),
+            review_feedback=feedback,
+            reviewer=reviewer,
+            reviewed_at=reviewed_at,
+            review_history_items=history,
+            review_bypassed=bool(run_record.get("review_bypassed")),
+            review_bypass_reason=str(run_record.get("review_bypass_reason") or "").strip(),
+            review_bypassed_at=str(run_record.get("review_bypassed_at") or "").strip(),
+        )
+        updated["task_id"] = task_id or str(updated.get("task_id") or "").strip()
+        updated["task_guid"] = task_guid or str(updated.get("task_guid") or "").strip()
+        sync_result = sync_review_feedback(task_guid, task_id, event) if task_guid else {"comment_result": None, "state_result": None}
+        api.write_pm_run_record(updated, run_id=resolved_run_id or str(updated.get("run_id") or "").strip())
+        payload = dict(updated)
+        payload["run_id"] = resolved_run_id or str(updated.get("run_id") or "").strip()
+        payload["sync_result"] = sync_result
+        return emit(payload)
+
+    def cmd_rerun(args: argparse.Namespace) -> int:
+        task = None
+        if args.task_guid:
+            task = api.get_task_record_by_guid(args.task_guid)
+        elif args.task_id:
+            task = api.get_task_record(args.task_id, include_completed=True)
+        prior_run, resolved_run_id = resolve_run_record(
+            task_id=str((task or {}).get("task_id") or args.task_id or "").strip(),
+            task_guid=str((task or {}).get("guid") or args.task_guid or "").strip(),
+            run_id=args.run_id,
+        )
+        prior_status = str(prior_run.get("review_status") or "").strip().lower()
+        if prior_status != "failed":
+            raise SystemExit(f"rerun requires the source run to be failed, got: {prior_status or 'unknown'}")
+        feedback = str(prior_run.get("review_feedback") or "").strip()
+        task_id = str((task or {}).get("task_id") or prior_run.get("task_id") or args.task_id or "").strip()
+        task_guid = str((task or {}).get("guid") or prior_run.get("task_guid") or args.task_guid or "").strip()
+        rerun_args = argparse.Namespace(
+            task_id=task_id,
+            task_guid=task_guid,
+            backend=args.backend,
+            agent=args.agent,
+            timeout=args.timeout,
+            thinking=args.thinking,
+            session_key=args.session_key,
+        )
+
+        def apply_review_feedback(bundle: dict[str, Any]) -> None:
+            bundle["review_context"] = {
+                "prior_run_id": resolved_run_id or str(prior_run.get("run_id") or "").strip(),
+                "review_feedback": feedback,
+                "reviewer": str(prior_run.get("reviewer") or "").strip(),
+                "reviewed_at": str(prior_run.get("reviewed_at") or "").strip(),
+            }
+
+        payload = execute_run(
+            rerun_args,
+            review_required=bool(prior_run.get("review_required", True)),
+            review_status="pending",
+            attempt=int(prior_run.get("attempt") or 1) + 1,
+            review_round=int(prior_run.get("review_round") or 1) + 1,
+            rerun_of_run_id=resolved_run_id or str(prior_run.get("run_id") or "").strip(),
+            review_feedback=feedback,
+            reviewer="",
+            reviewed_at="",
+            review_history_items=review_history(prior_run),
+            bundle_mutator=apply_review_feedback,
+        )
+        return emit(payload)
+
     def cmd_complete(args: argparse.Namespace) -> int:
         task = api.get_task_record_by_guid(args.task_guid) if args.task_guid else api.get_task_record(args.task_id, include_completed=args.include_completed)
         guid = str(task.get("guid") or "").strip()
         if not guid:
             raise SystemExit(f"task missing guid: {args.task_id or args.task_guid}")
+        last_run = load_last_run_record()
+        latest_run_id = str((last_run or {}).get("run_id") or "").strip()
+        latest_review_status = str((last_run or {}).get("review_status") or "").strip().lower()
+        latest_review_feedback = str((last_run or {}).get("review_feedback") or "").strip()
+        review_required = bool((last_run or {}).get("review_required"))
+        if review_gate_enforced() and review_required and latest_review_status not in {"passed", "bypassed"}:
+            if not args.force_review_bypass:
+                suggestion = "pm review --verdict pass|fail" if latest_review_status == "pending" else "pm rerun"
+                raise SystemExit(
+                    "review gate blocked completion: "
+                    + json.dumps(
+                        {
+                            "task_id": str(task.get("task_id") or args.task_id or "").strip(),
+                            "run_id": latest_run_id,
+                            "review_status": latest_review_status or "missing",
+                            "review_feedback": latest_review_feedback,
+                            "next_step": suggestion,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
         content = api.resolve_optional_text_input(args.content, args.content_file)
         upload_result = api.upload_task_attachments(task, args.task_id, args.file)
         if upload_result.get("status") == "authorization_required":
@@ -797,7 +1108,29 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             comment_payload = api.create_task_comment(guid, completion_comment)
         completed_at = api.now_iso()
         payload = api.patch_task(guid, {"completed_at": completed_at})
-        last_run = api.load_json_file(api.pm_file("last-run.json"))
+        review_bypass = None
+        if args.force_review_bypass and isinstance(last_run, dict):
+            bypassed_at = api.now_iso()
+            last_run = decorate_run_payload(
+                payload=last_run,
+                review_required=bool(last_run.get("review_required")),
+                review_status="bypassed",
+                attempt=int(last_run.get("attempt") or 1),
+                review_round=int(last_run.get("review_round") or 1),
+                rerun_of_run_id=str(last_run.get("rerun_of_run_id") or "").strip(),
+                review_feedback=str(last_run.get("review_feedback") or "").strip(),
+                reviewer=str(last_run.get("reviewer") or "").strip(),
+                reviewed_at=str(last_run.get("reviewed_at") or "").strip(),
+                review_history_items=review_history(last_run),
+                review_bypassed=True,
+                review_bypass_reason="pm complete --force-review-bypass",
+                review_bypassed_at=bypassed_at,
+            )
+            review_bypass = {
+                "status": "bypassed",
+                "bypassed_at": bypassed_at,
+                "reason": "pm complete --force-review-bypass",
+            }
         finalized_run, cleanup_result = api.finalize_last_run_for_completion(
             last_run,
             task_id=str(task.get("task_id") or args.task_id or "").strip(),
@@ -819,6 +1152,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 "commit_url": commit_url,
                 "upload_result": upload_result,
                 "result": payload,
+                "review_bypass": review_bypass,
                 "cleanup_result": cleanup_result,
                 "context_path": str(api.pm_file("current-context.json")),
                 "next_task": context.get("next_task"),
@@ -954,6 +1288,9 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         "refine": cmd_refine,
         "coder_context": cmd_coder_context,
         "run": cmd_run,
+        "run_reviewed": cmd_run_reviewed,
+        "review": cmd_review,
+        "rerun": cmd_rerun,
         "create": cmd_create,
         "get": cmd_get,
         "comment": cmd_comment,

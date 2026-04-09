@@ -117,6 +117,12 @@ def default_config() -> dict[str, Any]:
             "auto_switch_to_acp": False,
             "acp_cleanup": "delete",
         },
+        "review": {
+            "required": True,
+            "enforce_on_complete": True,
+            "sync_comment": True,
+            "sync_state": True,
+        },
         "tasklist_name": "选育溯源档案",
         "task_prefix": "T",
         "kind": "task",
@@ -158,7 +164,13 @@ def load_config(path_value: str) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise SystemExit(f"invalid config payload: {path}")
-        config.update(payload)
+        for key, value in payload.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                merged = dict(config.get(key) or {})
+                merged.update(value)
+                config[key] = merged
+                continue
+            config[key] = value
     config["_config_path"] = str(path)
     return config
 
@@ -269,3 +281,13 @@ def coder_config() -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
     return default_config()["coder"]
+
+
+def review_config() -> dict[str, Any]:
+    defaults = default_config()["review"]
+    raw = ACTIVE_CONFIG.get("review")
+    if not isinstance(raw, dict):
+        return dict(defaults)
+    merged = dict(defaults)
+    merged.update(raw)
+    return merged

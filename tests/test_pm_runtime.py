@@ -10,6 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1] / "skills" / "pm" / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from pm_config import default_config
 from pm_runtime import describe_openclaw_agent_failure, run_codex_cli
 
 
@@ -36,6 +37,13 @@ class PmRuntimeTest(unittest.TestCase):
             )
         self.assertEqual(result["backend"], "codex-cli")
         self.assertEqual(mocked_run.call_args.kwargs["timeout"], 300)
+
+    def test_default_config_includes_review_defaults(self) -> None:
+        review = default_config()["review"]
+        self.assertEqual(review["required"], True)
+        self.assertEqual(review["enforce_on_complete"], True)
+        self.assertEqual(review["sync_comment"], True)
+        self.assertEqual(review["sync_state"], True)
 
 
 if __name__ == "__main__":

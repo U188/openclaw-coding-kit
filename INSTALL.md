@@ -181,7 +181,9 @@ Gateway 如果要经 HTTP `/tools/invoke` 调 `sessions_spawn`，还要放开默
 ```bash
 codex login status
 /usr/local/node/bin/acpx codex sessions new
-python3 skills/pm/scripts/pm.py run --backend codex-cli --agent codex --timeout 120
+python3 skills/pm/scripts/pm.py run-reviewed --task-id T1 --backend codex-cli --agent codex --timeout 120
+python3 skills/pm/scripts/pm.py review --task-id T1 --verdict pass --reviewer qa
+python3 skills/pm/scripts/pm.py complete --task-id T1 --content "validated"
 python3 skills/pm/scripts/pm.py run --backend acp --agent codex --timeout 120
 ```
 
@@ -196,7 +198,8 @@ python3 skills/pm/scripts/pm.py run --backend acp --agent codex --timeout 120
 - 如果 `openclaw config validate` 仍报 `plugin not found`，优先修配置，而不是重复安装 CLI
 - 在 OpenClaw `2026.3.24` 上，推荐保留 `coder.backend = "codex-cli"` 作为默认配置；如需自动把 brownfield、required reads 多、task/doc 协作重的执行切到 `acp`，请显式设置 `coder.auto_switch_to_acp = true`
 - 如果显式使用 `backend=acp`，默认 `coder.acp_cleanup = "delete"`，run-mode 子会话在任务完成后按机制自动回收；只有需要保留现场排障时才改成 `"keep"`
-- 任务结束以后，以 `pm complete` 作为正式收口动作；该命令会把 cleanup 结果写回 `.pm/last-run.json`
+- 默认收口链路改为 `pm run-reviewed` -> `pm review --verdict pass|fail` -> 失败时 `pm rerun` -> `pm complete`
+- `pm complete` 会拒绝最近一次 run 仍为 `pending` / `failed` 的任务；特殊情况必须显式传 `--force-review-bypass`，并且 bypass 会写入 `.pm/last-run.json`
 
 #### Feishu 插件
 

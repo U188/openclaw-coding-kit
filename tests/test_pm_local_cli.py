@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -119,6 +120,133 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(last_run["cleanup_result"]["status"], "finalized")
             self.assertEqual(last_run["cleanup_result"]["owned_artifacts"]["run_record"], "kept")
             self.assertEqual(last_run["cleanup_result"]["owned_artifacts"]["acp_session"], "auto-delete-on-run-exit")
+
+    def test_reviewed_flow_requires_pass_or_explicit_bypass_before_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            planning = root / ".planning"
+            planning.mkdir(parents=True)
+            for name in ("PROJECT.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md"):
+                (planning / name).write_text(f"# {name}\n", encoding="utf-8")
+            config = {
+                "repo_root": str(root),
+                "project": {"name": "demo"},
+                "task": {"backend": "local", "tasklist_name": "demo", "prefix": "T", "kind": "task"},
+                "doc": {"backend": "repo", "folder_name": "demo"},
+                "coder": {"backend": "codex-cli", "agent_id": "codex", "timeout": 60, "thinking": "high", "session_key": "main"},
+                "review": {"required": True, "enforce_on_complete": True, "sync_comment": True, "sync_state": True},
+            }
+            config_path = root / "pm.json"
+            config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                "out=\"\"\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = \"-o\" ]; then\n"
+                "    shift\n"
+                "    out=\"$1\"\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ -n \"$out\" ]; then\n"
+                "  printf '%s\\n' 'worker ok' > \"$out\"\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env = os.environ.copy()
+            env["CODEX_BIN"] = str(fake_codex)
+
+            def run_ok(*args: str) -> dict:
+                proc = subprocess.run(
+                    ["python3", str(PM_SCRIPT), "--config", str(config_path), *args],
+                    cwd=str(root),
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    env=env,
+                )
+                return json.loads(proc.stdout)
+
+            def run_fail(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["python3", str(PM_SCRIPT), "--config", str(config_path), *args],
+                    cwd=str(root),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                )
+
+            created = run_ok("create", "--summary", "Reviewed task")
+            self.assertEqual(created["task_id"], "T1")
+
+            first_run = run_ok("run-reviewed", "--task-id", "T1", "--backend", "codex-cli", "--agent", "codex")
+            self.assertEqual(first_run["review_status"], "pending")
+            self.assertEqual(first_run["review_required"], True)
+
+            blocked_pending = run_fail("complete", "--task-id", "T1", "--content", "should block")
+            self.assertNotEqual(blocked_pending.returncode, 0)
+            self.assertIn("review gate", blocked_pending.stderr)
+
+            failed_review = run_ok(
+                "review",
+                "--task-id",
+                "T1",
+                "--verdict",
+                "fail",
+                "--feedback",
+                "Add regression coverage",
+                "--reviewer",
+                "qa",
+            )
+            self.assertEqual(failed_review["review_status"], "failed")
+            self.assertEqual(failed_review["review_feedback"], "Add regression coverage")
+
+            blocked_failed = run_fail("complete", "--task-id", "T1", "--content", "still blocked")
+            self.assertNotEqual(blocked_failed.returncode, 0)
+            self.assertIn("review gate", blocked_failed.stderr)
+            self.assertIn("Add regression coverage", blocked_failed.stderr)
+
+            rerun = run_ok("rerun", "--task-id", "T1", "--backend", "codex-cli", "--agent", "codex")
+            self.assertEqual(rerun["review_status"], "pending")
+            self.assertEqual(rerun["attempt"], 2)
+            self.assertEqual(rerun["review_round"], 2)
+            self.assertEqual(rerun["rerun_of_run_id"], first_run["run_id"])
+
+            passed_review = run_ok(
+                "review",
+                "--task-id",
+                "T1",
+                "--verdict",
+                "pass",
+                "--reviewer",
+                "qa",
+            )
+            self.assertEqual(passed_review["review_status"], "passed")
+            self.assertEqual(len(passed_review["review_history"]), 2)
+
+            completed = run_ok("complete", "--task-id", "T1", "--content", "done after pass")
+            self.assertEqual(completed["task_id"], "T1")
+
+            bypass_task = run_ok("create", "--summary", "Bypass task")
+            bypass_run = run_ok("run-reviewed", "--task-id", bypass_task["task_id"], "--backend", "codex-cli", "--agent", "codex")
+            self.assertEqual(bypass_run["review_status"], "pending")
+
+            bypass_complete = run_ok(
+                "complete",
+                "--task-id",
+                bypass_task["task_id"],
+                "--content",
+                "forced completion",
+                "--force-review-bypass",
+            )
+            self.assertEqual(bypass_complete["review_bypass"]["status"], "bypassed")
+            last_run = json.loads((root / ".pm" / "last-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(last_run["review_status"], "bypassed")
+            self.assertTrue(last_run["review_bypassed"])
 
     def test_repo_root_prefers_target_repo_pm_json_without_explicit_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other_tmp:

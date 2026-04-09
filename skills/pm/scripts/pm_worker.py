@@ -240,4 +240,19 @@ def build_run_message(bundle: dict[str, Any]) -> str:
         lines.extend(f"- {item}" for item in required_reads)
     if gsd_plan_path or gsd_required_reads:
         lines.append("Do not guess the phase context from memory; use the handoff contract and .planning files as source of truth.")
+    review_context = bundle.get("review_context") if isinstance(bundle.get("review_context"), dict) else {}
+    if review_context:
+        prior_run_id = str(review_context.get("prior_run_id") or "").strip()
+        review_feedback = str(review_context.get("review_feedback") or "").strip()
+        reviewer = str(review_context.get("reviewer") or "").strip()
+        reviewed_at = str(review_context.get("reviewed_at") or "").strip()
+        lines.append("This run is a rerun after review feedback.")
+        if prior_run_id:
+            lines.append(f"Prior reviewed run: {prior_run_id}")
+        if reviewer or reviewed_at:
+            detail = " / ".join(item for item in [reviewer, reviewed_at] if item)
+            lines.append(f"Review source: {detail}")
+        if review_feedback:
+            lines.append("Review feedback to address before completing:")
+            lines.append(review_feedback)
     return "\n".join(str(x) for x in lines if str(x).strip())

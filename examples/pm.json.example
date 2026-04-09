@@ -26,5 +26,11 @@
     "session_key": "main",
     "auto_switch_to_acp": false,
     "acp_cleanup": "delete"
+  },
+  "review": {
+    "required": true,
+    "enforce_on_complete": true,
+    "sync_comment": true,
+    "sync_state": true
   }
 }

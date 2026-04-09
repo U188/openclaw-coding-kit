@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from contextlib import contextmanager
@@ -25,7 +26,7 @@ class _FakeApi:
         self.codex_calls = 0
         self.persist_dispatch_calls = 0
         self.persist_run_calls = 0
-        self.last_bundle = {"current_task": {"task_id": "T1"}}
+        self.last_bundle = {"current_task": {"task_id": "T1", "guid": "guid-T1", "summary": "Task 1"}}
         self.ACTIVE_CONFIG = {}
         self._coder_config = {
             "backend": "codex-cli",
@@ -37,7 +38,13 @@ class _FakeApi:
             "acp_cleanup": "delete",
         }
         self.last_run_record = None
+        self.run_records: dict[str, dict] = {}
         self._now_counter = 0
+        self.comments: list[tuple[str, str]] = []
+        self.state_updates: list[str] = []
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._pm_dir = Path(self._tmpdir.name) / ".pm"
+        self._pm_dir.mkdir(parents=True, exist_ok=True)
 
     def build_coder_context(self, task_id: str = "", task_guid: str = ""):
         return self.last_bundle, Path("/tmp/coder-context.json")
@@ -45,7 +52,24 @@ class _FakeApi:
     def coder_config(self) -> dict:
         return dict(self._coder_config)
 
+    def default_config(self) -> dict:
+        return {
+            "task": {"backend": "local"},
+            "doc": {"backend": "repo"},
+            "coder": dict(self._coder_config),
+            "review": {
+                "required": True,
+                "enforce_on_complete": True,
+                "sync_comment": True,
+                "sync_state": True,
+            },
+        }
+
     def build_run_message(self, bundle: dict) -> str:
+        review_context = bundle.get("review_context") if isinstance(bundle.get("review_context"), dict) else {}
+        feedback = str(review_context.get("review_feedback") or "").strip()
+        if feedback:
+            return f"run message\n{feedback}"
         return "run message"
 
     def resolve_effective_task(self, bundle: dict) -> dict:
@@ -59,6 +83,12 @@ class _FakeApi:
 
     def project_root_path(self, repo_root: str | None = None) -> Path:
         return Path("/tmp/repo")
+
+    def pm_dir_path(self, repo_root: str | None = None) -> Path:
+        return self._pm_dir
+
+    def pm_file(self, name: str) -> Path:
+        return self._pm_dir / name
 
     def spawn_acp_session(self, **kwargs):
         self.spawn_calls += 1
@@ -101,7 +131,29 @@ class _FakeApi:
         return f"2026-04-09T07:00:0{self._now_counter}+08:00"
 
     def load_json_file(self, path: Path):
-        return self.last_run_record
+        if path.name == "last-run.json":
+            return dict(self.last_run_record) if isinstance(self.last_run_record, dict) else None
+        if path.parent.name == "runs":
+            record = self.run_records.get(path.stem)
+            return dict(record) if isinstance(record, dict) else None
+        return None
+
+    def create_task_comment(self, task_guid: str, content: str) -> dict:
+        self.comments.append((task_guid, content))
+        return {"task_guid": task_guid, "content": content}
+
+    def append_state_doc(self, markdown: str) -> dict:
+        self.state_updates.append(markdown)
+        return {"status": "ok"}
+
+    def refresh_context_cache(self, **kwargs) -> dict:
+        return {}
+
+    def get_task_record(self, task_id: str, include_completed: bool = False) -> dict:
+        return {"task_id": task_id, "guid": f"guid-{task_id}", "summary": f"{task_id} summary"}
+
+    def get_task_record_by_guid(self, task_guid: str) -> dict:
+        return {"task_id": "T1", "guid": task_guid, "summary": "T1 summary"}
 
     def finalize_last_run_for_completion(self, last_run: dict | None, *, task_id: str = "", task_guid: str = "", completed_at: str, finalized_at: str):
         if not isinstance(last_run, dict):
@@ -123,6 +175,9 @@ class _FakeApi:
         self.last_written_payload = payload
         self.last_written_run_id = run_id
         self.last_run_record = dict(payload)
+        normalized_run_id = str(run_id or payload.get("run_id") or "").strip()
+        if normalized_run_id:
+            self.run_records[normalized_run_id] = dict(payload)
 
 
 class PmCommandsFallbackTest(unittest.TestCase):
@@ -158,7 +213,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(api.last_locked_task_id, "T1")
         self.assertEqual(api.last_written_name, "last-run.json")
         self.assertEqual(api.last_written_payload["backend"], "codex-cli")
-        self.assertEqual(api.last_written_run_id, "")
+        self.assertTrue(str(api.last_written_run_id).startswith("run-t1-"))
 
     def test_cmd_run_auto_switches_default_codex_cli_to_acp_for_brownfield_bundle(self) -> None:
         api = _FakeApi()
@@ -243,6 +298,84 @@ class PmCommandsFallbackTest(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["run_id"], "run-123")
         self.assertEqual(api.last_written_run_id, "run-123")
+
+    def test_cmd_run_reviewed_writes_pending_review_metadata(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="codex-cli",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run_reviewed"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["review_required"], True)
+        self.assertEqual(payload["review_status"], "pending")
+        self.assertEqual(payload["attempt"], 1)
+        self.assertEqual(payload["review_round"], 1)
+        self.assertEqual(payload["review_history"], [])
+        self.assertTrue(str(payload["run_id"]).startswith("run-"))
+        self.assertEqual(api.last_written_run_id, payload["run_id"])
+
+    def test_cmd_rerun_carries_failed_review_feedback_and_increments_round(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        source_run = {
+            "run_id": "run-source",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "review_required": True,
+            "review_status": "failed",
+            "review_feedback": "Address the missing test coverage.",
+            "reviewer": "qa",
+            "reviewed_at": "2026-04-09T07:10:00+08:00",
+            "review_history": [
+                {
+                    "verdict": "fail",
+                    "review_status": "failed",
+                    "feedback": "Address the missing test coverage.",
+                    "reviewer": "qa",
+                    "reviewed_at": "2026-04-09T07:10:00+08:00",
+                }
+            ],
+            "attempt": 1,
+            "review_round": 1,
+        }
+        api.last_run_record = dict(source_run)
+        api.run_records["run-source"] = dict(source_run)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            run_id="",
+            backend="codex-cli",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["rerun"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["review_required"], True)
+        self.assertEqual(payload["review_status"], "pending")
+        self.assertEqual(payload["attempt"], 2)
+        self.assertEqual(payload["review_round"], 2)
+        self.assertEqual(payload["rerun_of_run_id"], "run-source")
+        self.assertIn("Address the missing test coverage.", payload["message_preview"])
+        self.assertNotEqual(payload["run_id"], "run-source")
 
 
 if __name__ == "__main__":

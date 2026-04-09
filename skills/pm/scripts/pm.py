@@ -48,6 +48,7 @@ from pm_config import pm_file
 from pm_config import project_name
 from pm_config import project_root_path
 from pm_config import repo_root
+from pm_config import review_config
 from pm_config import resolve_config_path
 from pm_config import task_kind
 from pm_config import task_prefix
@@ -1073,6 +1074,13 @@ def write_pm_run_record(payload: dict[str, Any], *, run_id: str = "") -> list[Pa
     return written
 
 
+def load_run_record(run_id: str) -> dict[str, Any] | None:
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return None
+    return load_json_file(pm_dir_path() / "runs" / f"{normalized_run_id}.json")
+
+
 @contextmanager
 def task_run_lock(task_id: str):
     normalized = re.sub(r"[^a-z0-9]+", "-", str(task_id or "").lower()).strip("-") or "unknown-task"
@@ -1421,6 +1429,14 @@ def upload_task_attachments(task: dict[str, Any], task_id: str, file_args: list[
     )
 
 
+def review_comment_sync_enabled() -> bool:
+    return bool(review_config().get("sync_comment"))
+
+
+def review_state_sync_enabled() -> bool:
+    return bool(review_config().get("sync_state"))
+
+
 def current_head_commit_url(root: str) -> str:
     return resolve_pm_head_commit_url(root)
 
@@ -1613,8 +1629,13 @@ def build_cli_api() -> SimpleNamespace:
         project_root_path=project_root_path,
         refresh_context_cache=refresh_context_cache,
         register_workspace=register_workspace,
+        append_state_doc=append_state_doc,
+        review_comment_sync_enabled=review_comment_sync_enabled,
+        review_config=review_config,
+        review_state_sync_enabled=review_state_sync_enabled,
         request_json=request_json,
         request_user_oauth_link=request_user_oauth_link,
+        load_run_record=load_run_record,
         resolve_config_path=resolve_config_path,
         resolve_effective_task=resolve_effective_task,
         resolve_openclaw_config_path=resolve_openclaw_config_path,

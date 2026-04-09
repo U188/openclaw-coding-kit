@@ -88,7 +88,13 @@ Recommended config:
 {
   "task": { "backend": "local" },
   "doc": { "backend": "repo" },
-  "coder": { "backend": "codex-cli", "agent_id": "codex" }
+  "coder": { "backend": "codex-cli", "agent_id": "codex" },
+  "review": {
+    "required": true,
+    "enforce_on_complete": true,
+    "sync_comment": true,
+    "sync_state": true
+  }
 }
 ```
 
@@ -116,7 +122,27 @@ Current operator recommendation on OpenClaw `2026.3.24`:
 - only enable automatic ACP routing when you explicitly set `coder.auto_switch_to_acp = true`
 - when `backend=acp`, default `coder.acp_cleanup = "delete"` so run-mode child sessions are auto-reclaimed after completion; set it to `"keep"` only when you deliberately want to preserve the child session for debugging
 - task completion is finalized by `pm complete`; it now writes machine-readable cleanup metadata back into `.pm/last-run.json` instead of relying on operator memory
+- the default operator loop is now `pm run-reviewed` -> `pm review --verdict pass|fail` -> `pm rerun` when failed -> `pm complete` only after pass
 - if `sessions_spawn` is used through Gateway HTTP, expose it with `gateway.tools.allow = ["sessions_spawn", "sessions_send"]`
+
+## Review Loop
+
+Recommended PM operator flow:
+
+```bash
+python3 skills/pm/scripts/pm.py run-reviewed --task-id T1
+python3 skills/pm/scripts/pm.py review --task-id T1 --verdict fail --feedback "List the problems to fix" --reviewer qa
+python3 skills/pm/scripts/pm.py rerun --task-id T1
+python3 skills/pm/scripts/pm.py review --task-id T1 --verdict pass --reviewer qa
+python3 skills/pm/scripts/pm.py complete --task-id T1 --content "done"
+```
+
+Behavior summary:
+
+- `run-reviewed` behaves like `run` but marks the run record as review-required with `review_status=pending`
+- `review --verdict fail` records structured reviewer metadata plus feedback history and keeps completion blocked
+- `rerun` creates a new run record, carries the latest failed feedback into the coder handoff, increments `attempt` and `review_round`, and links `rerun_of_run_id`
+- `complete` now rejects `pending` and `failed` latest runs unless you explicitly pass `--force-review-bypass`, which is also recorded in the run record
 
 ## Quick Start
 
