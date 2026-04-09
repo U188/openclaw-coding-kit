@@ -135,6 +135,7 @@ Current operator recommendation on OpenClaw `2026.3.24`:
 - reviewed PM runs now create a monitor record under `.pm/monitors/<run_id>.json` and attach the same `monitor` block to `.pm/last-run.json` and `.pm/runs/<run_id>.json`; this continuation guard exists so progress does not rely on operator memory
 - if `sessions_spawn` is used through Gateway HTTP, expose it with `gateway.tools.allow = ["sessions_spawn", "sessions_send"]`
 - monitor mode also needs bridge access to `cron.add` and `cron.remove`; PM schedules the continuation guard as an isolated `agentTurn` cron job that reads absolute `.pm` paths from the prompt and treats progress updates as non-terminal
+- user-visible follow-up jobs are now an explicit code contract inside `pm_monitor.py`: they must use `payload.kind=agentTurn`, `delivery.mode=announce`, and a non-`main` session target, so this behavior does not rely on operator memory
 
 ## Review Loop
 
@@ -156,14 +157,14 @@ Behavior summary:
 - `run-reviewed` now starts one continuation monitor for supported PM backends (`acp`, `codex-cli`, `openclaw`) and persists deterministic monitor state in `.pm/monitors/<run_id>.json`
 - `review --verdict fail` records structured reviewer metadata plus feedback history and keeps completion blocked
 - `rerun` creates a new run record, carries the latest failed feedback into the coder handoff, increments `attempt` and `review_round`, links `rerun_of_run_id`, and stops the previous active monitor before starting the new one
-- `monitor-status` reads the explicit `--run-id` or falls back to the task's latest run so operators can inspect cron metadata without opening JSON files manually
+- `monitor-status` reads the explicit `--run-id` or resolves the requested task's latest run from `.pm/runs/*.json`, so operators can inspect cron metadata without opening JSON files manually
 - `monitor-stop` is idempotent and persists the final stop result back into monitor and run records
 - if the bridge cannot create the cron job, the run still succeeds and the monitor is persisted as `cron-error` instead of aborting the whole execution
-- `complete` now rejects `pending` and `failed` latest runs unless you explicitly pass `--force-review-bypass`, which is also recorded in the run record; when the latest run has an active monitor and monitor auto-stop is enabled, `complete` also closes the cron automatically
+- `complete` now rejects `pending` and `failed` latest runs for the requested task unless you explicitly pass `--force-review-bypass`, which is also recorded in the run record; when that task's latest run has an active monitor and monitor auto-stop is enabled, `complete` also closes the cron automatically
 
 ## Quick Start
 
-If you want the fastest meaningful validation path, do not start with Feishu. These commands are intended to work from any clone or copied directory, not just the author's machine. The first command writes a repo-local `pm.json` so the following steps keep using `local/repo` backend. Run:
+If you want the fastest meaningful validation path, do not start with Feishu. These commands are intended to work from any clone or copied directory, not just the author's machine. The `init --write-config` step writes a repo-local `pm.json` so the following steps keep using `local/repo` backend. Run:
 
 ```bash
 python3 -m py_compile skills/pm/scripts/*.py skills/coder/scripts/*.py

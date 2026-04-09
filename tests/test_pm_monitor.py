@@ -11,7 +11,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import pm_config
-from pm_monitor import build_monitor_job, build_monitor_prompt, build_monitor_state, should_start_monitor
+from pm_monitor import (
+    build_monitor_job,
+    build_monitor_prompt,
+    build_monitor_state,
+    build_user_visible_followup_job,
+    should_start_monitor,
+    validate_user_visible_followup_job,
+)
 
 
 class PmMonitorTest(unittest.TestCase):
@@ -83,6 +90,8 @@ class PmMonitorTest(unittest.TestCase):
         self.assertEqual(state["watch_mode"], "child-session")
         self.assertEqual(state["status"], "pending-cron")
         self.assertEqual(state["continuation_contract"]["progress_updates_are_terminal"], False)
+        self.assertEqual(state["reporting_contract"]["delivery_mode"], "announce")
+        self.assertEqual(state["reporting_contract"]["payload_kind"], "agentTurn")
         self.assertTrue(str(state["monitor_path"]).endswith(".pm/monitors/run-1.json"))
 
     def test_build_monitor_prompt_points_to_run_and_monitor_records(self) -> None:
@@ -104,6 +113,30 @@ class PmMonitorTest(unittest.TestCase):
         self.assertIn("Backend: codex-cli", prompt)
         self.assertIn("Treat progress updates as non-terminal", prompt)
 
+    def test_build_user_visible_followup_job_uses_announce_contract(self) -> None:
+        job = build_user_visible_followup_job(
+            name="pm-monitor-run-1",
+            schedule={"kind": "every", "everyMs": 300000},
+            message="hello",
+            timeout_seconds=1200,
+            session_target="isolated",
+        )
+        self.assertEqual(job["payload"]["kind"], "agentTurn")
+        self.assertEqual(job["delivery"]["mode"], "announce")
+        self.assertEqual(job["sessionTarget"], "isolated")
+
+    def test_validate_user_visible_followup_job_rejects_non_announcing_jobs(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_user_visible_followup_job(
+                {
+                    "name": "bad-job",
+                    "schedule": {"kind": "every", "everyMs": 300000},
+                    "payload": {"kind": "systemEvent", "text": "noop"},
+                    "sessionTarget": "main",
+                    "delivery": {"mode": "none"},
+                }
+            )
+
     def test_build_monitor_job_uses_agent_turn_cron_payload(self) -> None:
         state = {
             "run_id": "run-1",
@@ -116,11 +149,13 @@ class PmMonitorTest(unittest.TestCase):
             "backend": "codex-cli",
             "watch_mode": "run-record",
             "child_session_key": "",
+            "reporting_contract": {"session_target": "isolated"},
         }
         job = build_monitor_job(state, monitor_cfg={"stalled_after_minutes": 20})
         self.assertEqual(job["name"], "pm-monitor-run-1")
         self.assertEqual(job["schedule"]["kind"], "every")
         self.assertEqual(job["payload"]["kind"], "agentTurn")
+        self.assertEqual(job["delivery"]["mode"], "announce")
         self.assertEqual(job["sessionTarget"], "isolated")
         self.assertEqual(job["payload"]["timeoutSeconds"], 1200)
         self.assertIn("Run record: /repo/.pm/runs/run-1.json", job["payload"]["message"])

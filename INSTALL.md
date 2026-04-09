@@ -208,9 +208,10 @@ python3 skills/pm/scripts/pm.py run --backend acp --agent codex --timeout 120
 - 在 OpenClaw `2026.3.24` 上，推荐保留 `coder.backend = "codex-cli"` 作为默认配置；如需自动把 brownfield、required reads 多、task/doc 协作重的执行切到 `acp`，请显式设置 `coder.auto_switch_to_acp = true`
 - 如果显式使用 `backend=acp`，默认 `coder.acp_cleanup = "delete"`，run-mode 子会话在任务完成后按机制自动回收；只有需要保留现场排障时才改成 `"keep"`
 - 默认收口链路改为 `pm run-reviewed` -> `pm review --verdict pass|fail` -> 失败时 `pm rerun` -> `pm complete`
-- `pm complete` 会拒绝最近一次 run 仍为 `pending` / `failed` 的任务；特殊情况必须显式传 `--force-review-bypass`，并且 bypass 会写入 `.pm/last-run.json`
+- `pm complete` 会拒绝该任务最近一次 run 仍为 `pending` / `failed` 的情况；特殊情况必须显式传 `--force-review-bypass`，并且 bypass 会写入对应 run record 与 `.pm/last-run.json`
 - monitor loop 现在作为**继续推进机制**挂在 reviewed PM run 上；它依赖 bridge 侧暴露 `cron.add` 和 `cron.remove`，并通过 isolated `agentTurn` cron job 读取绝对 `.pm` 路径做巡检
 - 这条 continuation guard 不再只盯 ACP；当前支持 `acp`、`codex-cli`、`openclaw` 三类 PM backend
+- user-visible 的 follow-up / reporter job 现在有显式代码约束：必须走 `agentTurn + announce`，且不能绑到 `sessionTarget=main`；这样不会退化成只提醒 AI、不通知操作者的静默 cron
 - monitor 状态固定写入 `.pm/monitors/<run_id>.json`，并镜像到 `.pm/last-run.json` / `.pm/runs/<run_id>.json`
 
 Monitor operator flow:
@@ -228,15 +229,16 @@ python3 skills/pm/scripts/pm.py complete --task-id T1 --content "done"
 
 - `run-reviewed` 成功后生成 monitor JSON，并向 bridge 请求一条 cron；它的目的就是把“继续推进直到完成/阻塞/需拍板”固化成代码机制
 - `rerun` 会先关闭上一轮 monitor，再给新 run 建立新 monitor
+- `review`、`rerun`、`monitor-status`、`complete` 在没显式传 `--run-id` 时，会按你指定的 `--task-id` / `--task-guid` 去 `.pm/runs/*.json` 里解析该任务自己的最近一轮 run，而不是盲目吃全局 `last-run`
 - `complete` 会返回 `monitor_stop.status == "stopped"`，同时把最终 monitor 状态写回 `.pm/last-run.json`
 - 如果 bridge 暂时不可用，run 不会因为 monitor 建立失败而整体中断；对应 monitor 会落成 `cron-error`，方便后续补桥接后继续查
 
 如果当前没有 Feishu/真实 bridge，可以先用本地 fake bridge 做 smoke：
 
 ```bash
-OPENCLAW_LARK_BRIDGE_SCRIPT=/abs/path/to/fake-bridge.py python3 skills/pm/scripts/pm.py run-reviewed --task-id T1 --backend codex-cli --agent codex
-OPENCLAW_LARK_BRIDGE_SCRIPT=/abs/path/to/fake-bridge.py python3 skills/pm/scripts/pm.py monitor-status --task-id T1
-OPENCLAW_LARK_BRIDGE_SCRIPT=/abs/path/to/fake-bridge.py python3 skills/pm/scripts/pm.py complete --task-id T1 --content "local monitor smoke"
+OPENCLAW_LARK_BRIDGE_SCRIPT=./examples/fake-openclaw-lark-bridge.py python3 skills/pm/scripts/pm.py run-reviewed --task-id T1 --backend codex-cli --agent codex
+OPENCLAW_LARK_BRIDGE_SCRIPT=./examples/fake-openclaw-lark-bridge.py python3 skills/pm/scripts/pm.py monitor-status --task-id T1
+OPENCLAW_LARK_BRIDGE_SCRIPT=./examples/fake-openclaw-lark-bridge.py python3 skills/pm/scripts/pm.py complete --task-id T1 --content "local monitor smoke"
 ```
 
 #### Feishu 插件
