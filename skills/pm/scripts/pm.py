@@ -147,6 +147,7 @@ from pm_workspace import project_display_name as resolve_pm_project_display_name
 from pm_workspace import project_slug as build_pm_project_slug
 from pm_workspace import register_workspace as register_pm_workspace
 from pm_workspace import scaffold_workspace as scaffold_pm_workspace
+from pm_workspace import install_runtime_assets as install_pm_runtime_assets
 from pm_workspace import default_workspace_root as resolve_pm_default_workspace_root
 from pm_worker import build_run_message as build_worker_run_message
 from pm_worker import build_coder_handoff_contract as build_worker_handoff_contract
@@ -1765,6 +1766,7 @@ def build_cli_api() -> SimpleNamespace:
         project_root_path=project_root_path,
         refresh_context_cache=refresh_context_cache,
         register_workspace=register_workspace,
+        install_runtime_assets=install_pm_runtime_assets,
         append_state_doc=append_state_doc,
         review_comment_sync_enabled=review_comment_sync_enabled,
         review_config=review_config,

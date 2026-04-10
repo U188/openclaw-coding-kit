@@ -144,6 +144,30 @@ class PmLocalCliTest(unittest.TestCase):
             comments = task_detail.get("comments") or []
             self.assertTrue(any("显式 task 绑定已建立" in str(item.get("content") or "") for item in comments))
 
+    def test_install_assets_copies_repo_runtime_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path, env = self._build_monitor_cli_harness(root)
+            codex_home = root / "codex-home"
+            workspace_root = root / "workspace"
+
+            proc = self._run_pm(
+                root,
+                config_path,
+                env,
+                "install-assets",
+                "--codex-home",
+                str(codex_home),
+                "--workspace-root",
+                str(workspace_root),
+            )
+            payload = json.loads(proc.stdout)
+
+            self.assertEqual(payload["status"], "installed")
+            self.assertTrue((codex_home / "skills" / "pm" / "SKILL.md").exists())
+            self.assertTrue((workspace_root / "skills" / "pm" / "SKILL.md").exists())
+            self.assertTrue((workspace_root / "plugins" / "acp-progress-bridge").exists())
+
     def test_local_backend_supports_attachment_and_complete_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

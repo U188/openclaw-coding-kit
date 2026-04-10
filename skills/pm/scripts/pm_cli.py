@@ -266,6 +266,16 @@ def build_parser(*, handlers: dict[str, Any]) -> argparse.ArgumentParser:
     start_work.add_argument("--session-key", default="")
     start_work.set_defaults(func=handlers["start_work"])
 
+    install_assets = sub.add_parser("install-assets")
+    install_assets.add_argument("--codex-home", default="")
+    install_assets.add_argument("--workspace-root", default="")
+    install_assets.add_argument("--openclaw-config", default="")
+    install_assets.add_argument("--agent-id", default="")
+    install_assets.add_argument("--mode", choices=["copy", "symlink"], default="copy")
+    install_assets.add_argument("--force", action="store_true", default=False)
+    install_assets.add_argument("--dry-run", action="store_true", default=False)
+    install_assets.set_defaults(func=handlers["install_assets"])
+
     get = sub.add_parser("get")
     get.add_argument("--task-id", default="")
     get.add_argument("--task-guid", default="")

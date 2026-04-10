@@ -17,6 +17,10 @@ TOKEN_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 DEFAULT_SKILLS = ("pm", "coder", "code-review")
 DEFAULT_ALLOW_AGENTS = ("codex", "writer")
+RUNTIME_SKILL_NAMES = ("pm", "coder", "openclaw-lark-bridge")
+WORKSPACE_SKILL_NAMES = ("pm", "coder")
+RUNTIME_PLUGIN_NAMES = ("acp-progress-bridge",)
+CODEX_HOME_ENV_VARS = ("CODEX_HOME",)
 
 
 def _first_env_path(env_vars: tuple[str, ...]) -> Path | None:
@@ -34,6 +38,122 @@ def workspace_template_root() -> Path:
     if REPO_WORKSPACE_TEMPLATES.exists():
         return REPO_WORKSPACE_TEMPLATES
     return DEVTEAM_TEMPLATES
+
+
+def default_codex_root(explicit: str = "") -> Path:
+    raw = str(explicit or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    env_root = _first_env_path(CODEX_HOME_ENV_VARS)
+    if env_root is not None:
+        return env_root.expanduser().resolve()
+    return (Path.home() / ".codex").resolve()
+
+
+def _remove_existing_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _sync_directory(*, source: Path, target: Path, mode: str, force: bool) -> dict[str, Any]:
+    if not source.exists():
+        raise SystemExit(f"runtime asset source not found: {source}")
+    if mode not in {"copy", "symlink"}:
+        raise SystemExit(f"unsupported asset sync mode: {mode}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    action = "created"
+    if target.exists() or target.is_symlink():
+        if not force:
+            raise SystemExit(f"runtime asset target exists; pass --force to replace: {target}")
+        _remove_existing_path(target)
+        action = "replaced"
+    if mode == "symlink":
+        target.symlink_to(source, target_is_directory=True)
+    else:
+        shutil.copytree(source, target)
+    return {
+        "source": str(source),
+        "target": str(target),
+        "mode": mode,
+        "action": action,
+    }
+
+
+def install_runtime_assets(
+    *,
+    codex_home: str = "",
+    workspace_root: str = "",
+    mode: str = "copy",
+    force: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    repo_root = WORKSPACE_ROOT
+    codex_root = default_codex_root(codex_home)
+    workspace = Path(workspace_root).expanduser().resolve() if str(workspace_root or "").strip() else None
+
+    operations: list[dict[str, Any]] = []
+    for name in RUNTIME_SKILL_NAMES:
+        operations.append(
+            {
+                "kind": "codex_skill",
+                "name": name,
+                "source": str(repo_root / "skills" / name),
+                "target": str(codex_root / "skills" / name),
+            }
+        )
+    if workspace is not None:
+        for name in WORKSPACE_SKILL_NAMES:
+            operations.append(
+                {
+                    "kind": "workspace_skill",
+                    "name": name,
+                    "source": str(repo_root / "skills" / name),
+                    "target": str(workspace / "skills" / name),
+                }
+            )
+        for name in RUNTIME_PLUGIN_NAMES:
+            operations.append(
+                {
+                    "kind": "openclaw_plugin",
+                    "name": name,
+                    "source": str(repo_root / "plugins" / name),
+                    "target": str(workspace / "plugins" / name),
+                }
+            )
+
+    payload: dict[str, Any] = {
+        "repo_root": str(repo_root),
+        "codex_home": str(codex_root),
+        "workspace_root": str(workspace) if workspace is not None else "",
+        "mode": mode,
+        "force": bool(force),
+        "dry_run": bool(dry_run),
+        "operations": operations,
+    }
+    if dry_run:
+        payload["status"] = "dry_run"
+        return payload
+
+    applied: list[dict[str, Any]] = []
+    for item in operations:
+        applied.append(
+            {
+                "kind": item["kind"],
+                "name": item["name"],
+                **_sync_directory(
+                    source=Path(item["source"]),
+                    target=Path(item["target"]),
+                    mode=mode,
+                    force=force,
+                ),
+            }
+        )
+    payload["status"] = "installed"
+    payload["applied"] = applied
+    return payload
 
 
 def _is_ascii(text: str) -> bool:

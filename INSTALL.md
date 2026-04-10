@@ -435,36 +435,49 @@ plugins/acp-progress-bridge  -> $OPENCLAW_WORKSPACE/plugins/acp-progress-bridge
 - `acp-progress-bridge` 只放到 OpenClaw plugins 目录
 - `skills/openclaw-lark-bridge` 不作为默认 OpenClaw workspace 资产
 
-推荐复制命令：
+推荐直接用 repo 内命令同步运行时资产：
 
 ```bash
-mkdir -p ~/.codex/skills "$OPENCLAW_WORKSPACE/plugins"
-cp -R skills/pm ~/.codex/skills/pm
-cp -R skills/coder ~/.codex/skills/coder
-cp -R skills/openclaw-lark-bridge ~/.codex/skills/openclaw-lark-bridge
-cp -R plugins/acp-progress-bridge "$OPENCLAW_WORKSPACE/plugins/acp-progress-bridge"
+python3 skills/pm/scripts/pm.py install-assets --workspace-root "$OPENCLAW_WORKSPACE"
 ```
 
-复制后立刻检查：
+这条命令会默认完成：
+
+- `skills/pm` → `~/.codex/skills/pm`
+- `skills/coder` → `~/.codex/skills/coder`
+- `skills/openclaw-lark-bridge` → `~/.codex/skills/openclaw-lark-bridge`
+- `plugins/acp-progress-bridge` → `$OPENCLAW_WORKSPACE/plugins/acp-progress-bridge`
+- `skills/pm` → `$OPENCLAW_WORKSPACE/skills/pm`
+- `skills/coder` → `$OPENCLAW_WORKSPACE/skills/coder`
+
+如果你只想预览、不想落盘，先跑：
+
+```bash
+python3 skills/pm/scripts/pm.py install-assets --workspace-root "$OPENCLAW_WORKSPACE" --dry-run
+```
+
+如果目标目录已经存在并且你确认要替换，再加：
+
+```bash
+python3 skills/pm/scripts/pm.py install-assets --workspace-root "$OPENCLAW_WORKSPACE" --force
+```
+
+复制/安装后立刻检查：
 
 - `~/.codex/skills/pm/SKILL.md` 是否存在
 - `~/.codex/skills/coder/SKILL.md` 是否存在
 - `~/.codex/skills/openclaw-lark-bridge/SKILL.md` 是否存在
-- `plugins/acp-progress-bridge` 主文件是否存在
-
-如果你的 OpenClaw front agent 也需要直接加载 repo 内的 `pm` / `coder`，再额外复制到：
-
-```bash
-mkdir -p "$OPENCLAW_WORKSPACE/skills"
-cp -R skills/pm "$OPENCLAW_WORKSPACE/skills/pm"
-cp -R skills/coder "$OPENCLAW_WORKSPACE/skills/coder"
-```
+- `$OPENCLAW_WORKSPACE/skills/pm/SKILL.md` 是否存在
+- `$OPENCLAW_WORKSPACE/skills/coder/SKILL.md` 是否存在
+- `$OPENCLAW_WORKSPACE/plugins/acp-progress-bridge` 是否存在
 
 这里仍然不建议默认复制：
 
 ```text
 skills/openclaw-lark-bridge -> $OPENCLAW_WORKSPACE/skills/openclaw-lark-bridge
 ```
+
+手工 `cp -R` 仍然可行，但它现在只是 fallback，不再是推荐主路径。
 
 ### 4.2 最小 OpenClaw 配置
 

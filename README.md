@@ -194,7 +194,7 @@ Recommended order:
 
 1. install runtime prerequisites first
 2. verify repo-local smoke path
-3. deploy `pm`, `coder`, `openclaw-lark-bridge`, and `acp-progress-bridge`
+3. deploy `pm`, `coder`, `openclaw-lark-bridge`, and `acp-progress-bridge` via `python3 skills/pm/scripts/pm.py install-assets --workspace-root "$OPENCLAW_WORKSPACE"`
 4. wire `openclaw.json` and `pm.json`
 5. only then add Feishu bot, group, permissions, and OAuth when required
 6. finish with real backend initialization and E2E verification

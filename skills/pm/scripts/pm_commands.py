@@ -1166,6 +1166,25 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             }
         )
 
+    def cmd_install_assets(args: argparse.Namespace) -> int:
+        workspace_root = str(args.workspace_root or "").strip()
+        if not workspace_root and str(args.agent_id or "").strip():
+            openclaw_config_path = api.resolve_openclaw_config_path(str(args.openclaw_config or "").strip())
+            resolved_workspace_root = api.resolve_workspace_root(
+                openclaw_config_path=openclaw_config_path,
+                agent_id=str(args.agent_id or "").strip(),
+                explicit="",
+            )
+            workspace_root = str(resolved_workspace_root)
+        payload = api.install_runtime_assets(
+            codex_home=str(args.codex_home or "").strip(),
+            workspace_root=workspace_root,
+            mode=str(args.mode or "copy").strip() or "copy",
+            force=bool(args.force),
+            dry_run=bool(args.dry_run),
+        )
+        return emit(payload)
+
     def cmd_get(args: argparse.Namespace) -> int:
         task = api.get_task_record_by_guid(args.task_guid) if args.task_guid else api.get_task_record(args.task_id, include_completed=args.include_completed)
         guid = str(task.get("guid") or "").strip()
@@ -1577,6 +1596,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         "monitor_stop": cmd_monitor_stop,
         "create": cmd_create,
         "start_work": cmd_start_work,
+        "install_assets": cmd_install_assets,
         "get": cmd_get,
         "comment": cmd_comment,
         "complete": cmd_complete,
