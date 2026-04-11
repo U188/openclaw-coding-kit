@@ -24,6 +24,7 @@ class _FakeApi:
         self.spawn_calls = 0
         self.openclaw_calls = 0
         self.codex_calls = 0
+        self.last_openclaw_kwargs: dict = {}
         self.persist_dispatch_calls = 0
         self.persist_run_calls = 0
         self.last_bundle = {"current_task": {"task_id": "T1", "guid": "guid-T1", "summary": "Task 1"}}
@@ -121,6 +122,7 @@ class _FakeApi:
 
     def run_openclaw_agent(self, **kwargs):
         self.openclaw_calls += 1
+        self.last_openclaw_kwargs = dict(kwargs)
         return {"status": "ok", "summary": "completed", "result": {"payloads": []}}
 
     def run_codex_cli(self, **kwargs):
@@ -560,6 +562,33 @@ class PmCommandsFallbackTest(unittest.TestCase):
 
         self.assertIn("repo_root / cwd mismatch", str(ctx.exception))
         self.assertEqual(api.codex_calls, 0)
+
+    def test_cmd_run_uses_dedicated_session_id_for_openclaw_backend(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="openclaw",
+            agent="main",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["backend"], "openclaw")
+        self.assertEqual(api.openclaw_calls, 1)
+        self.assertEqual(api.codex_calls, 0)
+        self.assertEqual(api.spawn_calls, 0)
+        self.assertTrue(str(api.last_openclaw_kwargs.get("session_id") or "").startswith("pm-openclaw-"))
+        self.assertNotEqual(api.last_openclaw_kwargs.get("session_id"), "")
+        self.assertEqual(api.last_written_payload["backend"], "openclaw")
 
     def test_cmd_run_reviewed_starts_monitor_for_acp(self) -> None:
         api = _FakeApi()

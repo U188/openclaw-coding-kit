@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -168,6 +169,12 @@ def describe_openclaw_agent_failure(agent_id: str, *, stderr: str = "", stdout: 
             "Remember that the front agent and the ACP worker can be different roles.\n"
             "Check `openclaw agents list --bindings`, or set `project.agent`, or pass `--agent <front-agent>` explicitly."
         ).strip()
+    if "session file locked" in lowered:
+        return (
+            f"{message}\n"
+            "Hint: the target OpenClaw transcript session is already in use.\n"
+            "For PM-managed runs, avoid reusing the live chat session; pass a dedicated --session-id per invocation."
+        ).strip()
     if "not found" in lowered and "openclaw" in lowered:
         return (
             f"{message}\n"
@@ -183,14 +190,18 @@ def run_openclaw_agent(
     cwd: str = "",
     timeout_seconds: int = 900,
     thinking: str = "high",
+    session_id: str = "",
     bin_path_fn=openclaw_bin_path,
     env_fn=openclaw_env,
 ) -> dict[str, Any]:
+    effective_session_id = str(session_id or f"pm-openclaw-{uuid.uuid4()}").strip()
     cmd = [
         str(bin_path_fn()),
         "agent",
         "--agent",
         agent_id,
+        "--session-id",
+        effective_session_id,
         "--message",
         message,
         "--json",

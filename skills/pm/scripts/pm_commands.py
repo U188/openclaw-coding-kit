@@ -76,6 +76,15 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         coder = api.coder_config() if callable(getattr(api, "coder_config", None)) else {}
         return int((coder or {}).get("timeout") or 900)
 
+    def build_openclaw_session_id(*parts: str) -> str:
+        tokens: list[str] = []
+        for item in parts:
+            value = re.sub(r"[^a-z0-9]+", "-", str(item or "").strip().lower()).strip("-")
+            if value:
+                tokens.append(value)
+        suffix = "-".join(tokens)[:96].strip("-")
+        return f"pm-openclaw-{suffix}".strip("-") if suffix else "pm-openclaw"
+
     def review_executor_thinking() -> str:
         cfg = review_cfg()
         value = str(cfg.get("thinking") or "").strip()
@@ -797,6 +806,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 cwd=str(api.project_root_path()),
                 timeout_seconds=timeout_seconds,
                 thinking=thinking,
+                session_id=build_openclaw_session_id("review", reviewer, run_id),
             )
         else:
             result = api.run_codex_cli(
@@ -1529,6 +1539,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             thinking=thinking,
+            session_id=build_openclaw_session_id("run", label or agent_id),
         )
         side_effects = api.persist_run_side_effects(bundle, result)
         return normalized, result, side_effects, warnings
