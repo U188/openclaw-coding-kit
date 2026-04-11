@@ -41,6 +41,20 @@ class PmRunArtifactsTest(unittest.TestCase):
                             pass
             self.assertIn("task already running", str(ctx.exception))
 
+    def test_task_run_lock_reclaims_stale_pid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pm_dir = root / ".pm"
+            lock_dir = pm_dir / "locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / "t9.lock"
+            lock_path.write_text(json.dumps({"task_id": "T9", "pid": "999999"}, ensure_ascii=False), encoding="utf-8")
+            with mock.patch("pm.pm_dir_path", return_value=pm_dir):
+                with pm.task_run_lock("T9") as acquired:
+                    self.assertEqual(acquired, lock_path)
+                    self.assertTrue(lock_path.exists())
+            self.assertFalse(lock_path.exists())
+
     def test_task_scoped_run_lookup_prefers_runs_directory_over_global_last_run(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -219,6 +233,8 @@ class PmRunArtifactsTest(unittest.TestCase):
             (monitor_dir / "run-1.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
             with mock.patch("pm.pm_dir_path", return_value=pm_dir), mock.patch(
+                "pm.cron_list", return_value={"jobs": [{"jobId": "job-1"}]}
+            ), mock.patch(
                 "pm.cron_run", return_value={"status": "ok", "jobId": "job-1", "runMode": "force"}
             ) as mocked_cron_run, mock.patch("pm.now_iso", return_value="2026-04-09T08:00:00+08:00"):
                 result = pm.kickoff_run_monitor("run-1", reason="pm run-reviewed T1")
@@ -229,6 +245,69 @@ class PmRunArtifactsTest(unittest.TestCase):
             self.assertEqual(saved["kickoff_status"], "sent")
             self.assertEqual(saved["kickoff_reason"], "pm run-reviewed T1")
             self.assertEqual(saved["kickoff_result"]["jobId"], "job-1")
+
+    def test_start_run_monitor_accepts_cron_id_from_result_details(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pm_dir = root / ".pm"
+            runs_dir = pm_dir / "runs"
+            monitor_dir = pm_dir / "monitors"
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            monitor_dir.mkdir(parents=True, exist_ok=True)
+
+            run_id = "run-1"
+            run_record = {
+                "run_id": run_id,
+                "task_id": "T1",
+                "task_guid": "guid-T1",
+                "backend": "codex-cli",
+            }
+            (runs_dir / f"{run_id}.json").write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            with mock.patch("pm.project_root_path", return_value=root), mock.patch("pm.pm_dir_path", return_value=pm_dir), mock.patch(
+                "pm.pm_file", side_effect=lambda name: pm_dir / name
+            ), mock.patch(
+                "pm.monitor_config",
+                return_value={"enabled": True, "interval_minutes": 5, "notify_on_start": True, "auto_stop_on_complete": True},
+            ), mock.patch(
+                "pm.default_config", return_value={"monitor": {}}
+            ), mock.patch(
+                "pm.cron_add",
+                return_value={
+                    "result": {
+                        "details": {
+                            "id": "job-from-id"
+                        }
+                    }
+                },
+            ), mock.patch(
+                "pm.cron_list",
+                return_value={
+                    "result": {
+                        "details": {
+                            "jobs": [{"id": "job-from-id", "name": "pm-monitor-run-1"}]
+                        }
+                    }
+                },
+            ), mock.patch("pm.now_iso", return_value="2026-04-09T08:00:00+08:00"):
+                monitor = pm.start_run_monitor(
+                    repo_root=str(root),
+                    task_id="T1",
+                    task_guid="guid-T1",
+                    run_id=run_id,
+                    backend="codex-cli",
+                    side_effects={},
+                    session_key="main",
+                )
+
+            self.assertEqual(monitor["cron_job_id"], "job-from-id")
+            self.assertEqual(monitor["status"], "active")
+            self.assertEqual(monitor["status_reason"], "cron-verified")
+
+            saved = json.loads((monitor_dir / f"{run_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["cron_job_id"], "job-from-id")
+            self.assertEqual(saved["status"], "active")
+            self.assertEqual(saved["status_reason"], "cron-verified")
 
 
 if __name__ == "__main__":

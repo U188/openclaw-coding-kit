@@ -1139,6 +1139,24 @@ def _cron_jobs_from_list_result(result: dict[str, Any]) -> list[dict[str, Any]]:
             value = payload.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
+    bridge_result = result.get("result")
+    if isinstance(bridge_result, dict):
+        for key in ("jobs", "items"):
+            value = bridge_result.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        bridge_details = bridge_result.get("details")
+        if isinstance(bridge_details, dict):
+            for key in ("jobs", "items"):
+                value = bridge_details.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+    details = result.get("details")
+    if isinstance(details, dict):
+        for key in ("jobs", "items"):
+            value = details.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
     job = result.get("job")
     if isinstance(job, dict):
         return [job]
@@ -1228,7 +1246,17 @@ def start_run_monitor(
     except Exception as exc:  # pragma: no cover - defensive guard for bridge/runtime failures
         add_result = {"status": "error", "message": str(exc)}
     job_info = add_result.get("job") if isinstance(add_result.get("job"), dict) else {}
-    state["cron_job_id"] = str(job_info.get("jobId") or add_result.get("jobId") or "").strip()
+    add_result_payload = add_result.get("result") if isinstance(add_result.get("result"), dict) else {}
+    add_result_details = add_result_payload.get("details") if isinstance(add_result_payload.get("details"), dict) else {}
+    state["cron_job_id"] = str(
+        job_info.get("jobId")
+        or job_info.get("id")
+        or add_result.get("jobId")
+        or add_result.get("id")
+        or add_result_details.get("jobId")
+        or add_result_details.get("id")
+        or ""
+    ).strip()
     state["status"] = "pending-cron-check" if state["cron_job_id"] else "cron-error"
     state["status_reason"] = "cron-add-returned-job-id" if state["cron_job_id"] else "cron-add-missing-job-id"
     if not state["cron_job_id"] and str(state.get("kickoff_status") or "").strip() == "pending":
@@ -1300,10 +1328,31 @@ def task_run_lock(task_id: str):
     lock_dir = pm_dir_path() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{normalized}.lock"
-    try:
-        fd = lock_path.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise SystemExit(f"task already running: {task_id or normalized} ({lock_path})") from exc
+
+    def _pid_alive(pid_value: str) -> bool:
+        pid_text = str(pid_value or "").strip()
+        return bool(pid_text) and pid_text.isdigit() and Path(f"/proc/{pid_text}").exists()
+
+    while True:
+        try:
+            fd = lock_path.open("x", encoding="utf-8")
+            break
+        except FileExistsError as exc:
+            stale = False
+            try:
+                payload = json.loads(lock_path.read_text(encoding="utf-8") or "{}") if lock_path.exists() else {}
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            owner_pid = str((payload or {}).get("pid") or "").strip()
+            if lock_path.exists() and not _pid_alive(owner_pid):
+                stale = True
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            if stale:
+                continue
+            raise SystemExit(f"task already running: {task_id or normalized} ({lock_path})") from exc
     try:
         fd.write(json.dumps({"task_id": task_id, "pid": Path('/proc/self').resolve().name if Path('/proc/self').exists() else ""}, ensure_ascii=False))
         fd.flush()

@@ -195,6 +195,13 @@ def build_openclaw_session_id(session_id: str = "", *, agent_id: str = "") -> st
     return f"{normalized}-{uuid.uuid4().hex[:12]}"
 
 
+def openclaw_wrapper_timeout(timeout_seconds: int = 900) -> int | None:
+    requested = int(timeout_seconds or 0)
+    if requested <= 0:
+        return None
+    return requested + 30
+
+
 def run_openclaw_agent(
     *,
     agent_id: str,
@@ -207,6 +214,7 @@ def run_openclaw_agent(
     env_fn=openclaw_env,
 ) -> dict[str, Any]:
     effective_session_id = build_openclaw_session_id(session_id, agent_id=agent_id)
+    effective_timeout = openclaw_wrapper_timeout(timeout_seconds)
     cmd = [
         str(bin_path_fn()),
         "agent",
@@ -222,14 +230,23 @@ def run_openclaw_agent(
     ]
     if thinking:
         cmd.extend(["--thinking", thinking])
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env_fn(bin_path_fn=bin_path_fn),
-        cwd=cwd or None,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env_fn(bin_path_fn=bin_path_fn),
+            cwd=cwd or None,
+            timeout=effective_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        wrapper_note = (
+            f" (wrapper timeout: {effective_timeout}s)" if effective_timeout is not None else ""
+        )
+        raise SystemExit(
+            f"openclaw agent subprocess timed out after {timeout_seconds}s{wrapper_note}; backend may be hung after dispatch"
+        ) from exc
     if proc.returncode != 0:
         raise SystemExit(
             describe_openclaw_agent_failure(

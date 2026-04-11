@@ -11,7 +11,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from pm_config import default_config
-from pm_runtime import build_openclaw_session_id, describe_openclaw_agent_failure, run_codex_cli, run_openclaw_agent
+from pm_runtime import (
+    build_openclaw_session_id,
+    describe_openclaw_agent_failure,
+    openclaw_wrapper_timeout,
+    run_codex_cli,
+    run_openclaw_agent,
+)
 
 
 class PmRuntimeTest(unittest.TestCase):
@@ -43,6 +49,11 @@ class PmRuntimeTest(unittest.TestCase):
         self.assertNotEqual(value, "main")
         self.assertTrue(value.startswith("pm-openclaw-main-"))
 
+    def test_openclaw_wrapper_timeout_adds_grace_window(self) -> None:
+        self.assertEqual(openclaw_wrapper_timeout(120), 150)
+        self.assertEqual(openclaw_wrapper_timeout(1), 31)
+        self.assertIsNone(openclaw_wrapper_timeout(0))
+
     def test_run_openclaw_agent_always_passes_dedicated_session_id(self) -> None:
         with mock.patch("pm_runtime.subprocess.run") as mocked_run:
             mocked_run.return_value = subprocess.CompletedProcess(
@@ -66,6 +77,23 @@ class PmRuntimeTest(unittest.TestCase):
         idx = cmd.index("--session-id") + 1
         self.assertTrue(cmd[idx].startswith("pm-openclaw-main-"))
         self.assertNotEqual(cmd[idx], "main")
+        self.assertEqual(mocked_run.call_args.kwargs["timeout"], 150)
+
+    def test_run_openclaw_agent_reports_subprocess_timeout(self) -> None:
+        with mock.patch("pm_runtime.subprocess.run") as mocked_run:
+            mocked_run.side_effect = subprocess.TimeoutExpired(cmd=["openclaw"], timeout=150)
+            with self.assertRaises(SystemExit) as ctx:
+                run_openclaw_agent(
+                    agent_id="main",
+                    message="Reply with OK",
+                    cwd="/tmp",
+                    timeout_seconds=120,
+                    session_id="main",
+                    bin_path_fn=lambda: Path("/usr/bin/openclaw"),
+                    env_fn=lambda **_: {"PATH": "/usr/bin"},
+                )
+        self.assertIn("subprocess timed out after 120s", str(ctx.exception))
+        self.assertIn("wrapper timeout: 150s", str(ctx.exception))
 
     def test_default_config_includes_review_defaults(self) -> None:
         review = default_config()["review"]
