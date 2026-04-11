@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -183,6 +184,17 @@ def describe_openclaw_agent_failure(agent_id: str, *, stderr: str = "", stdout: 
     return message or f"openclaw agent failed: {agent_id}"
 
 
+def build_openclaw_session_id(session_id: str = "", *, agent_id: str = "") -> str:
+    raw = str(session_id or "").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+    if not normalized or normalized in {"main", "current", "default", "last"}:
+        agent_slug = re.sub(r"[^a-z0-9]+", "-", str(agent_id or "agent").strip().lower()).strip("-") or "agent"
+        normalized = f"pm-openclaw-{agent_slug}"
+    elif not normalized.startswith("pm-openclaw"):
+        normalized = f"pm-openclaw-{normalized}"
+    return f"{normalized}-{uuid.uuid4().hex[:12]}"
+
+
 def run_openclaw_agent(
     *,
     agent_id: str,
@@ -194,7 +206,7 @@ def run_openclaw_agent(
     bin_path_fn=openclaw_bin_path,
     env_fn=openclaw_env,
 ) -> dict[str, Any]:
-    effective_session_id = str(session_id or f"pm-openclaw-{uuid.uuid4()}").strip()
+    effective_session_id = build_openclaw_session_id(session_id, agent_id=agent_id)
     cmd = [
         str(bin_path_fn()),
         "agent",

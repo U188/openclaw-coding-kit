@@ -11,7 +11,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from pm_config import default_config
-from pm_runtime import describe_openclaw_agent_failure, run_codex_cli
+from pm_runtime import build_openclaw_session_id, describe_openclaw_agent_failure, run_codex_cli, run_openclaw_agent
 
 
 class PmRuntimeTest(unittest.TestCase):
@@ -37,6 +37,35 @@ class PmRuntimeTest(unittest.TestCase):
             )
         self.assertEqual(result["backend"], "codex-cli")
         self.assertEqual(mocked_run.call_args.kwargs["timeout"], 300)
+
+    def test_build_openclaw_session_id_rewrites_reserved_main(self) -> None:
+        value = build_openclaw_session_id("main", agent_id="main")
+        self.assertNotEqual(value, "main")
+        self.assertTrue(value.startswith("pm-openclaw-main-"))
+
+    def test_run_openclaw_agent_always_passes_dedicated_session_id(self) -> None:
+        with mock.patch("pm_runtime.subprocess.run") as mocked_run:
+            mocked_run.return_value = subprocess.CompletedProcess(
+                args=["openclaw"],
+                returncode=0,
+                stdout='{"status":"ok"}',
+                stderr="",
+            )
+            result = run_openclaw_agent(
+                agent_id="main",
+                message="Reply with OK",
+                cwd="/tmp",
+                timeout_seconds=120,
+                session_id="main",
+                bin_path_fn=lambda: Path("/usr/bin/openclaw"),
+                env_fn=lambda **_: {"PATH": "/usr/bin"},
+            )
+        self.assertEqual(result["status"], "ok")
+        cmd = mocked_run.call_args.args[0]
+        self.assertIn("--session-id", cmd)
+        idx = cmd.index("--session-id") + 1
+        self.assertTrue(cmd[idx].startswith("pm-openclaw-main-"))
+        self.assertNotEqual(cmd[idx], "main")
 
     def test_default_config_includes_review_defaults(self) -> None:
         review = default_config()["review"]
