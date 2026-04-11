@@ -302,18 +302,20 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 backend_warnings.append(
                     "Auto-switched backend from codex-cli to acp for this run: " + "；".join(prefer_reasons)
                 )
+        cwd_path = resolve_run_cwd(bundle)
         with api.task_run_lock(task_id):
             backend, result, side_effects, backend_runtime_warnings = run_coder_backend(
                 backend=backend,
                 agent_id=agent_id,
                 message=message,
-                cwd=str(api.project_root_path()),
+                cwd=str(cwd_path),
                 timeout_seconds=timeout_seconds,
                 thinking=thinking,
                 session_key=session_key,
                 label=label,
                 bundle=bundle,
                 acp_cleanup=acp_cleanup,
+                explicit_backend=explicit_backend,
             )
         backend_warnings.extend(backend_runtime_warnings)
         run_id = ""
@@ -336,6 +338,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             "acp_cleanup": acp_cleanup if backend == "acp" else "",
             "timeout": timeout_seconds,
             "thinking": thinking,
+            "cwd": str(cwd_path),
             "message_preview": message[:1200],
             "result": result,
             "side_effects": side_effects,
@@ -347,6 +350,8 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 agent_id=agent_id,
                 task_id=task_id,
                 auto_switched=auto_switched,
+                side_effects=side_effects,
+                cwd=str(cwd_path),
             ),
         }
         payload = decorate_run_payload(
@@ -426,10 +431,113 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             reasons.append("任务超时预算较长")
         return (len(reasons) > 0), reasons
 
-    def build_runtime_banner(*, backend: str, agent_id: str, task_id: str, auto_switched: bool) -> str:
+    def extract_repo_hint_from_bundle(bundle: dict[str, Any]) -> str:
+        project = bundle.get("project") if isinstance(bundle.get("project"), dict) else {}
+        project_root = str(project.get("repo_root") or "").strip()
+        if project_root:
+            return project_root
+        task = api.resolve_effective_task(bundle)
+        description = str(task.get("description") or "").strip()
+        match = re.search(r"^Repo[：:]\s*(.+?)\s*$", description, flags=re.MULTILINE)
+        return str(match.group(1) if match else "").strip()
+
+    def resolve_run_cwd(bundle: dict[str, Any]) -> Path:
+        cwd_path = Path(api.project_root_path()).expanduser().resolve()
+        if not cwd_path.exists():
+            raise SystemExit(f"pm run blocked: configured repo_root does not exist: {cwd_path}")
+        if not cwd_path.is_dir():
+            raise SystemExit(f"pm run blocked: configured repo_root is not a directory: {cwd_path}")
+        hinted_repo = extract_repo_hint_from_bundle(bundle)
+        if hinted_repo:
+            hinted_path = Path(hinted_repo).expanduser().resolve()
+            if hinted_path != cwd_path:
+                raise SystemExit(
+                    "pm run blocked: repo_root / cwd mismatch. "
+                    f"task context expects {hinted_path}, but PM resolved {cwd_path}. "
+                    "Refresh PM context or fix pm.json repo_root before dispatch."
+                )
+        return cwd_path
+
+    def resolve_runtime_binary(base_name: str, env_vars: tuple[str, ...]) -> str:
+        resolver = getattr(api, "resolve_runtime_path", None)
+        if not callable(resolver):
+            return ""
+        resolved = resolver(env_vars=env_vars, path_lookup_names=(base_name,))
+        return str(resolved or "").strip()
+
+    def openclaw_config_payload() -> tuple[dict[str, Any], str]:
+        getter = getattr(api, "openclaw_config", None)
+        if not callable(getter):
+            return {}, ""
+        try:
+            payload = getter()
+        except SystemExit:
+            return {}, ""
+        if not isinstance(payload, dict):
+            return {}, ""
+        path_getter = getattr(api, "find_openclaw_config_path", None)
+        if callable(path_getter):
+            try:
+                path = path_getter()
+            except SystemExit:
+                path = None
+            return payload, str(path or "").strip()
+        return payload, ""
+
+    def acpx_permission_mode(payload: dict[str, Any]) -> str:
+        plugins = payload.get("plugins") if isinstance(payload.get("plugins"), dict) else {}
+        entries = plugins.get("entries") if isinstance(plugins.get("entries"), dict) else {}
+        acpx_entry = entries.get("acpx") if isinstance(entries.get("acpx"), dict) else {}
+        config = acpx_entry.get("config") if isinstance(acpx_entry.get("config"), dict) else {}
+        for key in ("permissionMode", "permission_mode"):
+            value = str(config.get(key) or "").strip()
+            if value:
+                return value
+        acp_cfg = payload.get("acp") if isinstance(payload.get("acp"), dict) else {}
+        for key in ("permissionMode", "permission_mode"):
+            value = str(acp_cfg.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def acpx_write_allowed(permission_mode: str) -> bool:
+        normalized = str(permission_mode or "").strip().lower()
+        return normalized in {"approve-all", "bypass"}
+
+    def build_acp_permission_error(*, config_path: str, permission_mode: str) -> str:
+        where = config_path or "openclaw.json"
+        current = permission_mode or "missing"
+        return (
+            "pm run blocked before ACP dispatch: managed coder runs need ACPX write/exec approval, "
+            f"but {where} resolves to permissionMode={current}. "
+            "Set plugins.entries.acpx.config.permissionMode to approve-all, "
+            "or rerun with --backend codex-cli for local execution."
+        )
+
+    def build_runtime_banner(
+        *,
+        backend: str,
+        agent_id: str,
+        task_id: str,
+        auto_switched: bool,
+        side_effects: dict[str, Any] | None = None,
+        cwd: str = "",
+    ) -> str:
         task_suffix = f" · 任务 {task_id}" if task_id else ""
         switch_suffix = " · 本次为自动路由" if auto_switched else ""
-        return f"🔔 当前任务已进入 OpenClaw Coding Kit（PM）执行链路 · backend={backend} · agent={agent_id}{task_suffix}{switch_suffix}"
+        effective_side_effects = side_effects if isinstance(side_effects, dict) else {}
+        run_suffix = ""
+        child_session_key = str(effective_side_effects.get("session_key") or "").strip()
+        run_id = str(effective_side_effects.get("run_id") or "").strip()
+        if child_session_key:
+            run_suffix += f" · child_session={child_session_key}"
+        if run_id:
+            run_suffix += f" · run_id={run_id}"
+        cwd_suffix = f" · cwd={cwd}" if cwd else ""
+        return (
+            f"🔔 PM 执行器已确认 · backend={backend} · agent={agent_id}"
+            f"{task_suffix}{switch_suffix}{run_suffix}{cwd_suffix}"
+        )
 
     def run_coder_backend(
         *,
@@ -443,9 +551,31 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         label: str,
         bundle: dict[str, Any],
         acp_cleanup: str,
+        explicit_backend: bool,
     ) -> tuple[str, dict[str, Any], dict[str, Any], list[str]]:
         warnings: list[str] = []
         normalized = str(backend or "acp").strip() or "acp"
+        if normalized == "acp":
+            openclaw_payload, openclaw_config_path = openclaw_config_payload()
+            permission_mode = acpx_permission_mode(openclaw_payload)
+            if openclaw_payload and not acpx_write_allowed(permission_mode):
+                codex_cli_path = resolve_runtime_binary("codex", ("CODEX_BIN", "CODEX_PATH", "CODEX_CLI"))
+                if explicit_backend or not codex_cli_path:
+                    raise SystemExit(
+                        build_acp_permission_error(
+                            config_path=openclaw_config_path,
+                            permission_mode=permission_mode,
+                        )
+                    )
+                warnings.append(
+                    "ACPX preflight rejected this managed write run "
+                    f"(permissionMode={permission_mode or 'missing'}); fell back to backend=codex-cli."
+                )
+                normalized = "codex-cli"
+            elif not openclaw_payload:
+                warnings.append(
+                    "ACP preflight could not inspect openclaw.json; runtime fallback will rely on actual dispatch result."
+                )
         if normalized == "acp":
             try:
                 result = api.spawn_acp_session(
@@ -457,6 +587,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                     label=label,
                     session_key=session_key,
                     cleanup=acp_cleanup,
+                    permission_mode="approve-all",
                 )
                 side_effects = api.persist_dispatch_side_effects(bundle, result, agent_id=agent_id, runtime="acp")
                 return normalized, result, side_effects, warnings
@@ -470,6 +601,18 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 elif "acpx exited with code 1" in error_text or "Internal error" in error_text:
                     warnings.append(
                         "ACP runtime failed while creating the Codex session; fell back to backend=codex-cli."
+                    )
+                    normalized = "codex-cli"
+                elif "Permission denied by ACP runtime" in error_text or "permissionmode" in error_text.lower():
+                    codex_cli_path = resolve_runtime_binary("codex", ("CODEX_BIN", "CODEX_PATH", "CODEX_CLI"))
+                    if explicit_backend or not codex_cli_path:
+                        raise SystemExit(
+                            error_text
+                            + "\nHint: ACPX blocked write/exec. Set plugins.entries.acpx.config.permissionMode=approve-all "
+                            "or rerun with --backend codex-cli."
+                        )
+                    warnings.append(
+                        "ACP runtime denied write/exec during session creation; fell back to backend=codex-cli."
                     )
                     normalized = "codex-cli"
                 else:
@@ -1117,7 +1260,8 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                     f"任务：{task_id or task_guid}",
                     f"执行方式：pm {mode}",
                     f"执行体：backend={backend_name} agent={agent_name}",
-                    f"状态：{'ready' if bool(getattr(args, 'no_run', False)) else 'dispatching'}",
+                    f"状态：{'ready' if bool(getattr(args, 'no_run', False)) else 'preflight'}",
+                    "说明：真实 backend/session/run_id 以成功派发后的 run 记录与评论为准。",
                     "机制：显式 task 绑定已建立。",
                 ]
             )

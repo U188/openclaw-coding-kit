@@ -130,6 +130,7 @@ Current operator recommendation on OpenClaw `2026.3.24`:
 - keep `coder.backend = "codex-cli"` as the default config for local-first operation
 - keep `backend=acp` available as an explicit path when you want native ACP child sessions
 - only enable automatic ACP routing when you explicitly set `coder.auto_switch_to_acp = true`
+- managed `pm run*` ACP dispatch now preflights `cwd` and ACPX write permission before claiming success; if `plugins.entries.acpx.config.permissionMode` is missing or read-only, PM either downgrades to `codex-cli` or stops with an explicit error instead of pretending dispatch succeeded
 - when `backend=acp`, default `coder.acp_cleanup = "delete"` so run-mode child sessions are auto-reclaimed after completion; set it to `"keep"` only when you deliberately want to preserve the child session for debugging
 - task completion is finalized by `pm complete`; it now writes machine-readable cleanup metadata back into `.pm/last-run.json` instead of relying on operator memory
 - the default operator loop is now `pm run-reviewed` -> `pm review --verdict pass|fail` -> `pm rerun` when failed -> `pm complete` only after pass

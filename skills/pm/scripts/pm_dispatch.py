@@ -26,6 +26,7 @@ def spawn_acp_session(
     label: str = "",
     session_key: str = "main",
     cleanup: str = "delete",
+    permission_mode: str = "approve-all",
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
         "task": message,
@@ -38,6 +39,8 @@ def spawn_acp_session(
         "cleanup": cleanup,
         "sandbox": "inherit",
     }
+    if permission_mode:
+        args["permissionMode"] = permission_mode
     if label:
         args["label"] = label
     return run_bridge("sessions_spawn", "", args, session_key=session_key)

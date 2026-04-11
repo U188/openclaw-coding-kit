@@ -59,6 +59,7 @@ class PmBridgeTest(unittest.TestCase):
         spawn_args = captured["args"]
         self.assertIsInstance(spawn_args, dict)
         self.assertEqual(spawn_args["sandbox"], "inherit")
+        self.assertEqual(spawn_args["permissionMode"], "approve-all")
         self.assertEqual(spawn_args["cwd"], "/tmp/project")
         self.assertEqual(spawn_args["mode"], "run")
         self.assertEqual(spawn_args["cleanup"], "delete")

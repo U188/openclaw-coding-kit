@@ -55,6 +55,12 @@
 {
   "plugins": {
     "entries": {
+      "acpx": {
+        "enabled": true,
+        "config": {
+          "permissionMode": "approve-all"
+        }
+      },
       "acp-progress-bridge": {
         "enabled": true,
         "config": {
@@ -83,6 +89,9 @@
 ```
 
 如果你现在只做本地无鉴权验证，这段可以完全跳过。
+
+`permissionMode = "approve-all"` 是当前 managed `pm run*` 走 ACP 写入/执行链路的最小保护配置。
+如果缺失、`approve-reads` 或 `deny-all`，PM 现在会在派发前降级到 `codex-cli` 或直接报错，而不是假装已经派发成功。
 
 当前推荐契约是：
 

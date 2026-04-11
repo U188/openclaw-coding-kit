@@ -496,6 +496,7 @@ def spawn_acp_session(
     label: str = "",
     session_key: str = "main",
     cleanup: str = "delete",
+    permission_mode: str = "approve-all",
 ) -> dict[str, Any]:
     return dispatch_acp_session(
         run_bridge,
@@ -507,6 +508,7 @@ def spawn_acp_session(
         label=label,
         session_key=session_key,
         cleanup=cleanup,
+        permission_mode=permission_mode,
     )
 
 
@@ -1739,6 +1741,7 @@ def build_cli_api() -> SimpleNamespace:
         extract_task_number=extract_task_number,
         feishu_credentials=feishu_credentials,
         find_existing_task_by_summary=find_existing_task_by_summary,
+        find_openclaw_config_path=find_openclaw_config_path,
         get_task_record=get_task_record,
         get_task_record_by_guid=get_task_record_by_guid,
         inspect_tasklist=inspect_tasklist,
@@ -1754,6 +1757,7 @@ def build_cli_api() -> SimpleNamespace:
         normalize_task_titles=normalize_task_titles,
         normalize_task_key=normalize_task_key,
         now_iso=now_iso,
+        openclaw_config=openclaw_config,
         parse_task_summary=parse_task_summary,
         plan_gsd_phase_workflow=plan_gsd_phase_workflow,
         persist_dispatch_side_effects=persist_dispatch_side_effects,
@@ -1778,6 +1782,7 @@ def build_cli_api() -> SimpleNamespace:
         resolve_effective_task=resolve_effective_task,
         resolve_openclaw_config_path=resolve_openclaw_config_path,
         resolve_optional_text_input=resolve_optional_text_input,
+        resolve_runtime_path=resolve_runtime_path,
         resolve_text_input=resolve_text_input,
         resolve_workspace_root=resolve_workspace_root,
         run_bridge=run_bridge,

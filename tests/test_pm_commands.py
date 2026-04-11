@@ -43,6 +43,8 @@ class _FakeApi:
         self.comments: list[tuple[str, str]] = []
         self.state_updates: list[str] = []
         self._tmpdir = tempfile.TemporaryDirectory()
+        self._repo_root = Path(self._tmpdir.name) / "repo"
+        self._repo_root.mkdir(parents=True, exist_ok=True)
         self._pm_dir = Path(self._tmpdir.name) / ".pm"
         self._pm_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,7 +94,15 @@ class _FakeApi:
         return f"{agent_id}:{task_id}"
 
     def project_root_path(self, repo_root: str | None = None) -> Path:
-        return Path("/tmp/repo")
+        return self._repo_root
+
+    def resolve_runtime_path(self, *, env_vars=(), path_lookup_names=(), fallback_paths=()):
+        if tuple(path_lookup_names or ()) == ("codex",):
+            return Path("/tmp/fake-codex")
+        return None
+
+    def openclaw_config(self) -> dict:
+        return {}
 
     def pm_dir_path(self, repo_root: str | None = None) -> Path:
         return self._pm_dir
@@ -281,10 +291,11 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(api.openclaw_calls, 0)
         self.assertEqual(api.persist_dispatch_calls, 0)
         self.assertEqual(api.persist_run_calls, 1)
-        self.assertIn("fell back to backend=codex-cli", payload["warnings"][0])
-        self.assertIn("OpenClaw Coding Kit（PM）执行链路", payload["runtime_banner"])
+        self.assertTrue(any("fell back to backend=codex-cli" in item for item in payload["warnings"]))
+        self.assertIn("PM 执行器已确认", payload["runtime_banner"])
         self.assertIn("backend=codex-cli", payload["runtime_banner"])
         self.assertIn("任务 T1", payload["runtime_banner"])
+        self.assertIn(f"cwd={api.project_root_path()}", payload["runtime_banner"])
         self.assertEqual(api.last_locked_task_id, "T1")
         self.assertEqual(api.last_written_name, "last-run.json")
         self.assertEqual(api.last_written_payload["backend"], "codex-cli")
@@ -430,8 +441,78 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(api.codex_calls, 0)
         self.assertEqual(api.last_locked_task_id, "T2")
         self.assertIn("Auto-switched backend from codex-cli to acp", payload["warnings"][0])
-        self.assertIn("OpenClaw Coding Kit（PM）执行链路", payload["runtime_banner"])
+        self.assertIn("PM 执行器已确认", payload["runtime_banner"])
         self.assertIn("backend=acp", payload["runtime_banner"])
+
+    def test_cmd_run_blocks_explicit_acp_when_permission_mode_is_not_writable(self) -> None:
+        api = _FakeApi()
+        api.openclaw_config = lambda: {"plugins": {"entries": {"acpx": {"config": {"permissionMode": "approve-reads"}}}}}
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="acp",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            handlers["run"](args)
+
+        self.assertIn("blocked before ACP dispatch", str(ctx.exception))
+        self.assertEqual(api.spawn_calls, 0)
+        self.assertEqual(api.codex_calls, 0)
+
+    def test_cmd_run_auto_downgrades_acp_when_permission_mode_is_not_writable(self) -> None:
+        api = _FakeApi()
+        api._coder_config["backend"] = "acp"
+        api.openclaw_config = lambda: {"plugins": {"entries": {"acpx": {"config": {"permissionMode": "approve-reads"}}}}}
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["backend"], "codex-cli")
+        self.assertEqual(api.spawn_calls, 0)
+        self.assertEqual(api.codex_calls, 1)
+        self.assertIn("fell back to backend=codex-cli", payload["warnings"][0])
+
+    def test_cmd_run_blocks_when_bundle_repo_hint_disagrees_with_cwd(self) -> None:
+        api = _FakeApi()
+        api.last_bundle = {
+            "project": {"repo_root": "/tmp/other-repo"},
+            "current_task": {"task_id": "T1", "guid": "guid-T1", "summary": "Task 1"},
+        }
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="codex-cli",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            handlers["run"](args)
+
+        self.assertIn("repo_root / cwd mismatch", str(ctx.exception))
+        self.assertEqual(api.codex_calls, 0)
 
     def test_cmd_run_reviewed_starts_monitor_for_acp(self) -> None:
         api = _FakeApi()
