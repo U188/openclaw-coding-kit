@@ -185,6 +185,8 @@ python3 skills/pm/scripts/pm.py start-work --task-id T123 --reviewed
 
 `start-work` is the preferred intake + kickoff + optional dispatch path for tracked work. It binds the task first, writes a kickoff comment, then dispatches execution.
 
+Current review boundary: `pm run-reviewed` creates a run that must later pass a manual review gate via `pm review` before `pm complete`. PM does not run an automatic review chain on its own.
+
 Direct dispatch is still available, but now requires explicit task binding:
 
 ```bash

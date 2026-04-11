@@ -22,13 +22,14 @@
 - v1 不做复杂的 ACP 流事件解析
 - v1 不新增数据库或外部队列
 - v1 不改 Feishu 权限流
-- v1 不要求 monitor 自己完成 review 判定；review gate 仍由 `pm review` / `pm complete` 管理
+- v1 不要求 monitor 自己完成 review 判定；当前 review 机制仍是由 `pm review` / `pm complete` 驱动的手动 review gate，不是自动 review chain
 
 ## 约束
 - 保持 KISS，不引入新依赖
 - 默认只对异步 run（优先 ACP）启用 monitor；同步本地 run 返回 `not-applicable`
 - monitor 必须是幂等的：同一 run 不能重复挂多条活跃 cron
 - 监工的“命令成功”不算完成；必须把最终 monitor 状态写回文件
+- `monitor.status=active` 只能在 cron add 后再次校验 job 确实存在时写回；否则必须显式落成 `cron-error` / `skipped-no-cron`
 - 文档、示例配置、测试一起更新
 
 ## v1 机制结论

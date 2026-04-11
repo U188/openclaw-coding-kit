@@ -106,6 +106,7 @@ def build_monitor_state(
     watch_mode = _watch_mode(backend, side_effects)
     return {
         "status": "pending-cron",
+        "status_reason": "waiting-for-cron-add",
         "task_id": str(task_id or "").strip(),
         "task_guid": str(task_guid or "").strip(),
         "run_id": normalized_run_id,
@@ -165,6 +166,7 @@ def build_monitor_prompt(state: dict[str, Any]) -> str:
             "Treat progress updates as non-terminal. Keep pushing until the run reaches a real terminal state.",
             "Terminal states are: completed, blocked, or needs-decision.",
             "If the run is finalized/completed, remove the cron job and mark the monitor closed.",
+            "Review status is a manual review gate only. Do not invent or run an automatic review chain.",
             "If review is failed, emit one rerun reminder.",
             "If review is passed but task is not completed, emit one complete reminder.",
             "If the run is active but stalled, emit one continue reminder.",

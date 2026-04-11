@@ -234,6 +234,7 @@ class _FakeApi:
     def start_run_monitor(self, *, repo_root: str, task_id: str, task_guid: str, run_id: str, backend: str, side_effects: dict, session_key: str) -> dict:
         return {
             "status": "active",
+            "status_reason": "cron-verified",
             "task_id": task_id,
             "task_guid": task_guid,
             "run_id": run_id,
@@ -244,6 +245,13 @@ class _FakeApi:
             "kickoff_enabled": True,
             "kickoff_status": "pending",
         }
+
+    def refresh_run_monitor(self, run_id: str, *, write: bool = True) -> dict:
+        record = self.run_records.get(run_id)
+        monitor = {}
+        if isinstance(record, dict) and isinstance(record.get("monitor"), dict):
+            monitor = dict(record["monitor"])
+        return {"status": str(monitor.get("status") or "not-found"), "monitor": monitor}
 
     def kickoff_run_monitor(self, run_id: str, *, reason: str = "pm monitor start") -> dict:
         monitor = {}
@@ -541,6 +549,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["monitor"]["status"], "active")
+        self.assertEqual(payload["monitor_status"], "active")
         self.assertEqual(payload["monitor"]["cron_job_id"], "job-run-1")
         self.assertEqual(payload["monitor"]["kickoff_status"], "sent")
         self.assertIn("pm run-reviewed", payload["monitor"]["kickoff_reason"])
@@ -566,6 +575,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["backend"], "codex-cli")
         self.assertEqual(payload["monitor"]["status"], "active")
+        self.assertEqual(payload["monitor_status"], "active")
         self.assertEqual(payload["monitor"]["backend"], "codex-cli")
         self.assertEqual(payload["monitor"]["kickoff_status"], "sent")
 

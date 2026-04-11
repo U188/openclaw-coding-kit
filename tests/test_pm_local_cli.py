@@ -39,6 +39,24 @@ class PmLocalCliTest(unittest.TestCase):
 
     def _build_monitor_cli_harness(self, root: Path) -> tuple[Path, dict[str, str]]:
         self._write_planning_scaffold(root)
+        (root / "openclaw.json").write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "entries": {
+                            "acpx": {
+                                "config": {
+                                    "permissionMode": "approve-all",
+                                }
+                            }
+                        }
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         config = {
             "repo_root": str(root),
             "project": {"name": "demo"},
@@ -344,7 +362,7 @@ class PmLocalCliTest(unittest.TestCase):
 
             blocked_pending = run_fail("complete", "--task-id", "T1", "--content", "should block")
             self.assertNotEqual(blocked_pending.returncode, 0)
-            self.assertIn("review gate", blocked_pending.stderr)
+            self.assertIn("manual review gate", blocked_pending.stderr)
 
             failed_review = run_ok(
                 "review",
@@ -362,7 +380,7 @@ class PmLocalCliTest(unittest.TestCase):
 
             blocked_failed = run_fail("complete", "--task-id", "T1", "--content", "still blocked")
             self.assertNotEqual(blocked_failed.returncode, 0)
-            self.assertIn("review gate", blocked_failed.stderr)
+            self.assertIn("manual review gate", blocked_failed.stderr)
             self.assertIn("Add regression coverage", blocked_failed.stderr)
 
             rerun = run_ok("rerun", "--task-id", "T1", "--backend", "codex-cli", "--agent", "codex")
@@ -416,11 +434,13 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(created["task_id"], "T1")
 
             first_run = run_ok("run-reviewed", "--task-id", "T1", "--backend", "acp", "--agent", "codex")
+            self.assertEqual(first_run["monitor_status"], "active")
             self.assertEqual(first_run["monitor"]["status"], "active")
             self.assertEqual(first_run["monitor"]["watch_mode"], "child-session")
             self.assertTrue(first_run["monitor"]["cron_job_id"])
             self.assertEqual(first_run["monitor"]["kickoff_status"], "sent")
             monitor_status = run_ok("monitor-status", "--task-id", "T1")
+            self.assertEqual(monitor_status["monitor_status"], "active")
             self.assertEqual(monitor_status["monitor"]["status"], "active")
             self.assertEqual(monitor_status["monitor"]["run_id"], first_run["run_id"])
             monitor_file = root / ".pm" / "monitors" / f"{first_run['run_id']}.json"
@@ -431,6 +451,7 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(job["payload"]["kind"], "agentTurn")
             self.assertEqual(job["sessionTarget"], "isolated")
             self.assertEqual(job["schedule"]["kind"], "every")
+            self.assertTrue(any(item["tool"] == "cron" and item["action"] == "list" for item in bridge_calls))
             cron_run = next(item for item in bridge_calls if item["tool"] == "cron" and item["action"] == "run")
             self.assertEqual(cron_run["args"]["jobId"], first_run["monitor"]["cron_job_id"])
             self.assertEqual(cron_run["args"]["runMode"], "force")
@@ -446,6 +467,7 @@ class PmLocalCliTest(unittest.TestCase):
 
             run_ok("create", "--summary", "Sync monitor task")
             first_run = run_ok("run-reviewed", "--task-id", "T1", "--backend", "codex-cli", "--agent", "codex")
+            self.assertEqual(first_run["monitor_status"], "active")
             self.assertEqual(first_run["monitor"]["status"], "active")
             self.assertEqual(first_run["monitor"]["watch_mode"], "run-record")
             self.assertTrue(first_run["monitor"]["cron_job_id"])
@@ -453,6 +475,7 @@ class PmLocalCliTest(unittest.TestCase):
             monitor_file = root / ".pm" / "monitors" / f"{first_run['run_id']}.json"
             self.assertTrue(monitor_file.exists())
             monitor_status = run_ok("monitor-status", "--run-id", first_run["run_id"])
+            self.assertEqual(monitor_status["monitor_status"], "active")
             self.assertEqual(monitor_status["monitor"]["status"], "active")
             self.assertEqual(monitor_status["monitor"]["backend"], "codex-cli")
 
@@ -475,6 +498,50 @@ class PmLocalCliTest(unittest.TestCase):
             monitor_status = run_ok("monitor-status", "--task-id", "T1")
             self.assertEqual(monitor_status["monitor"]["run_id"], first_run["run_id"])
             self.assertEqual(monitor_status["monitor"]["backend"], "openclaw")
+
+    def test_run_reviewed_marks_monitor_cron_error_when_add_list_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path, env = self._build_monitor_cli_harness(root)
+            env["FAKE_CRON_ADD_LIST_MISMATCH"] = "1"
+
+            def run_ok(*args: str) -> dict:
+                proc = self._run_pm(root, config_path, env, *args)
+                return json.loads(proc.stdout)
+
+            run_ok("create", "--summary", "Monitor mismatch task")
+            first_run = run_ok("run-reviewed", "--task-id", "T1", "--backend", "codex-cli", "--agent", "codex")
+            self.assertEqual(first_run["monitor_status"], "cron-error")
+            self.assertEqual(first_run["monitor"]["status"], "cron-error")
+            self.assertEqual(first_run["monitor"]["status_reason"], "cron-job-missing")
+            self.assertEqual(first_run["monitor"]["kickoff_status"], "skipped-no-cron")
+            monitor_status = run_ok("monitor-status", "--run-id", first_run["run_id"])
+            self.assertEqual(monitor_status["monitor_status"], "cron-error")
+            self.assertEqual(monitor_status["monitor"]["status"], "cron-error")
+
+    def test_monitor_status_persists_cron_error_when_job_is_lost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path, env = self._build_monitor_cli_harness(root)
+
+            def run_ok(*args: str) -> dict:
+                proc = self._run_pm(root, config_path, env, *args)
+                return json.loads(proc.stdout)
+
+            run_ok("create", "--summary", "Monitor lost job task")
+            first_run = run_ok("run-reviewed", "--task-id", "T1", "--backend", "acp", "--agent", "codex")
+            bridge_state = self._bridge_log(root)
+            bridge_state["jobs"] = []
+            (root / ".pm" / "fake-bridge-log.json").write_text(json.dumps(bridge_state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            monitor_status = run_ok("monitor-status", "--run-id", first_run["run_id"])
+            self.assertEqual(monitor_status["monitor_status"], "cron-error")
+            self.assertEqual(monitor_status["monitor"]["status"], "cron-error")
+            self.assertEqual(monitor_status["monitor"]["status_reason"], "cron-job-missing")
+
+            run_record = json.loads((root / ".pm" / "runs" / f"{first_run['run_id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_record["monitor_status"], "cron-error")
+            self.assertEqual(run_record["monitor"]["status"], "cron-error")
 
     def test_rerun_stops_previous_monitor_before_starting_new_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -516,6 +516,10 @@ def cron_add(job: dict[str, Any], *, session_key: str = "main") -> dict[str, Any
     return run_bridge("cron", "add", {"job": job}, session_key=session_key)
 
 
+def cron_list(*, session_key: str = "main") -> dict[str, Any]:
+    return run_bridge("cron", "list", {}, session_key=session_key)
+
+
 def cron_remove(job_id: str, *, session_key: str = "main") -> dict[str, Any]:
     return run_bridge("cron", "remove", {"jobId": job_id}, session_key=session_key)
 
@@ -1122,6 +1126,76 @@ def load_monitor_state(run_id: str) -> dict[str, Any] | None:
     return load_json_file(pm_dir_path() / "monitors" / f"{normalized_run_id}.json")
 
 
+def _cron_jobs_from_list_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    for key in ("jobs", "items"):
+        value = result.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    payload = result.get("data")
+    if isinstance(payload, dict):
+        for key in ("jobs", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    job = result.get("job")
+    if isinstance(job, dict):
+        return [job]
+    return []
+
+
+def _find_cron_job(jobs: list[dict[str, Any]], job_id: str) -> dict[str, Any] | None:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return None
+    for job in jobs:
+        candidate = str(job.get("jobId") or job.get("id") or "").strip()
+        if candidate == normalized_job_id:
+            return job
+    return None
+
+
+def refresh_run_monitor(run_id: str, *, write: bool = True) -> dict[str, Any]:
+    state = load_monitor_state(run_id)
+    if not isinstance(state, dict):
+        return {"status": "not-found", "run_id": str(run_id or "").strip()}
+    current_status = str(state.get("status") or "").strip()
+    if current_status in {"not-applicable", "stopped"}:
+        return {"status": current_status or "ok", "monitor": state}
+    cron_job_id = str(state.get("cron_job_id") or "").strip()
+    if not cron_job_id:
+        state["status"] = "cron-error"
+        state["status_reason"] = "missing-cron-job"
+        if str(state.get("kickoff_status") or "").strip() == "pending":
+            state["kickoff_status"] = "skipped-no-cron"
+        if write:
+            write_monitor_state(state)
+        return {"status": "cron-error", "monitor": state}
+    try:
+        list_result = cron_list(session_key=str(state.get("cron_session_key") or "main"))
+    except SystemExit as exc:
+        list_result = {"status": "error", "message": str(exc)}
+    except Exception as exc:  # pragma: no cover - defensive guard for bridge/runtime failures
+        list_result = {"status": "error", "message": str(exc)}
+    jobs = _cron_jobs_from_list_result(list_result)
+    matched_job = _find_cron_job(jobs, cron_job_id)
+    state["cron_list_result"] = list_result
+    state["last_checked_at"] = now_iso()
+    if isinstance(matched_job, dict):
+        state["status"] = "active"
+        state["status_reason"] = "cron-verified"
+        state["cron_job"] = matched_job
+    else:
+        state["status"] = "cron-error"
+        state["status_reason"] = "cron-job-missing"
+        if str(state.get("kickoff_status") or "").strip() == "pending":
+            state["kickoff_status"] = "skipped-no-cron"
+    if write:
+        write_monitor_state(state)
+    return {"status": str(state.get("status") or "").strip() or "unknown", "monitor": state}
+
+
 def start_run_monitor(
     *,
     repo_root: str,
@@ -1155,16 +1229,20 @@ def start_run_monitor(
         add_result = {"status": "error", "message": str(exc)}
     job_info = add_result.get("job") if isinstance(add_result.get("job"), dict) else {}
     state["cron_job_id"] = str(job_info.get("jobId") or add_result.get("jobId") or "").strip()
-    state["status"] = "active" if state["cron_job_id"] else "cron-error"
+    state["status"] = "pending-cron-check" if state["cron_job_id"] else "cron-error"
+    state["status_reason"] = "cron-add-returned-job-id" if state["cron_job_id"] else "cron-add-missing-job-id"
     if not state["cron_job_id"] and str(state.get("kickoff_status") or "").strip() == "pending":
         state["kickoff_status"] = "skipped-no-cron"
     state["cron_add_result"] = add_result
     write_monitor_state(state)
-    return state
+    refreshed = refresh_run_monitor(run_id, write=True)
+    monitor = refreshed.get("monitor") if isinstance(refreshed, dict) else None
+    return monitor if isinstance(monitor, dict) else state
 
 
 def kickoff_run_monitor(run_id: str, *, reason: str = "pm monitor start") -> dict[str, Any]:
-    state = load_monitor_state(run_id)
+    refreshed = refresh_run_monitor(run_id, write=True)
+    state = refreshed.get("monitor") if isinstance(refreshed, dict) else None
     if not isinstance(state, dict):
         return {"status": "not-found", "run_id": str(run_id or "").strip()}
     if not bool(state.get("kickoff_enabled", True)):
@@ -1725,6 +1803,7 @@ def build_cli_api() -> SimpleNamespace:
         create_task=create_task,
         create_task_comment=create_task_comment,
         cron_add=cron_add,
+        cron_list=cron_list,
         cron_remove=cron_remove,
         current_head_commit_url=current_head_commit_url,
         default_config=default_config,
@@ -1769,6 +1848,7 @@ def build_cli_api() -> SimpleNamespace:
         project_slug=project_slug,
         project_root_path=project_root_path,
         refresh_context_cache=refresh_context_cache,
+        refresh_run_monitor=refresh_run_monitor,
         register_workspace=register_workspace,
         install_runtime_assets=install_pm_runtime_assets,
         append_state_doc=append_state_doc,

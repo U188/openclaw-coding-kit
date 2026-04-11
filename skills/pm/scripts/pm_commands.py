@@ -76,7 +76,23 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             return
         updated = dict(run_record)
         updated["monitor"] = dict(monitor)
+        updated["monitor_status"] = str(monitor.get("status") or "").strip()
         api.write_pm_run_record(updated, run_id=normalized_run_id)
+
+    def refresh_monitor_for_run_record(run_record: dict[str, Any] | None, *, persist: bool = True) -> dict[str, Any] | None:
+        if not isinstance(run_record, dict):
+            return None
+        monitor = clone_monitor_state(run_record)
+        if not isinstance(monitor, dict):
+            return None
+        refresh = getattr(api, "refresh_run_monitor", None)
+        if not callable(refresh):
+            return monitor
+        refreshed = refresh(str(run_record.get("run_id") or "").strip(), write=persist)
+        refreshed_monitor = refreshed.get("monitor") if isinstance(refreshed, dict) else None
+        if isinstance(refreshed_monitor, dict) and persist:
+            persist_monitor_on_run_record(run_record, refreshed_monitor)
+        return dict(refreshed_monitor) if isinstance(refreshed_monitor, dict) else monitor
 
     def clone_run_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
         return dict(record) if isinstance(record, dict) else None
@@ -198,7 +214,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         comment_result = None
         state_result = None
         if review_comment_sync_enabled():
-            lines = [f"PM review verdict: {verdict}"]
+            lines = [f"PM manual review verdict: {verdict}", "Boundary: this is a manual review gate, not an automatic review chain."]
             if task_id_text:
                 lines.append(f"任务：{task_id_text}")
             if reviewer:
@@ -209,7 +225,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 lines.extend(["Feedback:", feedback])
             comment_result = api.create_task_comment(task_guid, "\n".join(lines))
         if review_state_sync_enabled():
-            state_lines = ["", "", "## PM Review Update", f"- verdict: {verdict}"]
+            state_lines = ["", "", "## PM Review Update", "- boundary: manual review gate, not an automatic review chain", f"- verdict: {verdict}"]
             if task_id_text:
                 state_lines.append(f"- 任务：{task_id_text}")
             if reviewer:
@@ -390,6 +406,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 monitor = dict(monitor)
                 monitor["replaces_run_id"] = rerun_of_run_id
         payload["monitor"] = monitor
+        payload["monitor_status"] = str(monitor.get("status") or "").strip() if isinstance(monitor, dict) else ""
         api.write_pm_run_record(payload, run_id=run_id)
         if isinstance(monitor, dict) and str(monitor.get("status") or "").strip() != "not-applicable":
             persist_monitor_on_run_record(payload, monitor)
@@ -406,6 +423,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                         monitor = dict(monitor)
                         monitor["replaces_run_id"] = rerun_of_run_id
                     payload["monitor"] = monitor
+                    payload["monitor_status"] = str(monitor.get("status") or "").strip()
                     api.write_pm_run_record(payload, run_id=run_id)
                     persist_monitor_on_run_record(payload, monitor)
         return payload
@@ -1261,7 +1279,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                     f"执行方式：pm {mode}",
                     f"执行体：backend={backend_name} agent={agent_name}",
                     f"状态：{'ready' if bool(getattr(args, 'no_run', False)) else 'preflight'}",
-                    "说明：真实 backend/session/run_id 以成功派发后的 run 记录与评论为准。",
+                    "说明：真实 backend/session/run_id/monitor_status 以成功派发后的 run 记录与评论为准。",
                     "机制：显式 task 绑定已建立。",
                 ]
             )
@@ -1493,7 +1511,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             if not args.force_review_bypass:
                 suggestion = "pm review --verdict pass|fail" if latest_review_status == "pending" else "pm rerun"
                 raise SystemExit(
-                    "review gate blocked completion: "
+                    "manual review gate blocked completion: "
                     + json.dumps(
                         {
                             "task_id": str(task.get("task_id") or args.task_id or "").strip(),
@@ -1505,6 +1523,11 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                         ensure_ascii=False,
                     )
                 )
+        refreshed_monitor = refresh_monitor_for_run_record(last_run, persist=True)
+        if isinstance(refreshed_monitor, dict) and isinstance(last_run, dict):
+            last_run = dict(last_run)
+            last_run["monitor"] = dict(refreshed_monitor)
+            last_run["monitor_status"] = str(refreshed_monitor.get("status") or "").strip()
         content = api.resolve_optional_text_input(args.content, args.content_file)
         upload_result = api.upload_task_attachments(task, args.task_id, args.file)
         if upload_result.get("status") == "authorization_required":
@@ -1565,6 +1588,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             if isinstance(stopped_monitor, dict):
                 finalized_run = dict(finalized_run)
                 finalized_run["monitor"] = dict(stopped_monitor)
+                finalized_run["monitor_status"] = str(stopped_monitor.get("status") or "").strip()
         if isinstance(finalized_run, dict):
             api.write_pm_run_record(finalized_run, run_id=str(finalized_run.get("run_id") or "").strip())
         context = api.refresh_context_cache()
@@ -1582,6 +1606,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 "review_bypass": review_bypass,
                 "cleanup_result": cleanup_result,
                 "monitor_stop": monitor_stop,
+                "monitor_status": str((finalized_run or {}).get("monitor_status") or "").strip(),
                 "context_path": str(api.pm_file("current-context.json")),
                 "next_task": context.get("next_task"),
             }
@@ -1589,10 +1614,10 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
 
     def cmd_monitor_status(args: argparse.Namespace) -> int:
         run_record, resolved_run_id = resolve_run_record(task_id=args.task_id, task_guid=args.task_guid, run_id=args.run_id)
-        monitor = clone_monitor_state(run_record)
+        monitor = refresh_monitor_for_run_record(run_record, persist=True)
         if not isinstance(monitor, dict):
             return emit({"status": "not-found", "run_id": resolved_run_id, "monitor": None})
-        return emit({"status": "ok", "run_id": resolved_run_id, "monitor": monitor})
+        return emit({"status": "ok", "run_id": resolved_run_id, "monitor": monitor, "monitor_status": str(monitor.get("status") or "").strip()})
 
     def cmd_monitor_stop(args: argparse.Namespace) -> int:
         run_record, resolved_run_id = resolve_run_record(task_id=args.task_id, task_guid=args.task_guid, run_id=args.run_id)
