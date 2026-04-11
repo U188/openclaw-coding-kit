@@ -39,9 +39,11 @@ class _FakeApi:
         }
         self.last_run_record = None
         self.run_records: dict[str, dict] = {}
+        self.run_record_history: list[dict] = []
         self._now_counter = 0
         self.comments: list[tuple[str, str]] = []
         self.state_updates: list[str] = []
+        self.reviewer_runs: list[dict] = []
         self._tmpdir = tempfile.TemporaryDirectory()
         self._repo_root = Path(self._tmpdir.name) / "repo"
         self._repo_root.mkdir(parents=True, exist_ok=True)
@@ -125,6 +127,31 @@ class _FakeApi:
         self.codex_calls += 1
         return {"backend": "codex-cli", "status": "ok", "summary": "completed", "result": {"payloads": []}}
 
+    def run_reviewer_worker(self, **kwargs):
+        self.reviewer_runs.append(dict(kwargs))
+        return {
+            "backend": str(kwargs.get("backend") or "codex-cli"),
+            "status": "ok",
+            "summary": "completed",
+            "result": {
+                "payloads": [
+                    {
+                        "text": json.dumps(
+                            {
+                                "verdict": "pass",
+                                "feedback": "",
+                                "summary": "Looks ready.",
+                                "confidence": "high",
+                                "evidence": ["tests referenced"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        "mediaUrl": None,
+                    }
+                ]
+            },
+        }
+
     def persist_dispatch_side_effects(self, bundle: dict, result: dict, *, agent_id: str, runtime: str) -> dict:
         self.persist_dispatch_calls += 1
         return {"runtime": runtime, "kind": "dispatch"}
@@ -183,6 +210,10 @@ class _FakeApi:
     def get_task_record_by_guid(self, task_guid: str) -> dict:
         return {"task_id": "T1", "guid": task_guid, "summary": "T1 summary"}
 
+    def list_task_comments(self, task_guid: str, limit: int = 20) -> list[dict]:
+        relevant = [content for guid, content in self.comments if guid == task_guid]
+        return [{"content": item} for item in relevant[-limit:]]
+
     def ensure_task_started(self, task: dict) -> None:
         return None
 
@@ -223,10 +254,12 @@ class _FakeApi:
         self.last_written_name = "last-run.json"
         self.last_written_payload = payload
         self.last_written_run_id = run_id
-        self.last_run_record = dict(payload)
+        snapshot = dict(payload)
+        self.last_run_record = snapshot
+        self.run_record_history.append(snapshot)
         normalized_run_id = str(run_id or payload.get("run_id") or "").strip()
         if normalized_run_id:
-            self.run_records[normalized_run_id] = dict(payload)
+            self.run_records[normalized_run_id] = snapshot
             runs_dir = self._pm_dir / "runs"
             runs_dir.mkdir(parents=True, exist_ok=True)
             (runs_dir / f"{normalized_run_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -343,6 +376,8 @@ class PmCommandsFallbackTest(unittest.TestCase):
             verdict="fail",
             feedback="redo",
             feedback_file="",
+            evidence=[],
+            evidence_file="",
             reviewer="qa",
         )
 
@@ -366,6 +401,10 @@ class PmCommandsFallbackTest(unittest.TestCase):
                 "session_key": "main",
                 "review_required": True,
                 "review_status": "passed",
+                "verification_status": "verified",
+                "verification_summary": "Verified against grounded PM evidence.",
+                "verification_evidence": ["pytest -q -> 3 passed"],
+                "verification_sources": ["task-comment"],
                 "attempt": 1,
                 "review_round": 1,
                 "monitor": {"status": "active", "run_id": "run-t1"},
@@ -588,6 +627,10 @@ class PmCommandsFallbackTest(unittest.TestCase):
             "run_id": "run-1",
             "review_required": True,
             "review_status": "passed",
+            "verification_status": "verified",
+            "verification_summary": "Verified against grounded PM evidence.",
+            "verification_evidence": ["pytest -q -> 3 passed"],
+            "verification_sources": ["task-comment"],
             "monitor": {"status": "active", "run_id": "run-1", "cron_job_id": "job-run-1"},
         }
         api.run_records["run-1"] = dict(api.last_run_record)
@@ -655,6 +698,106 @@ class PmCommandsFallbackTest(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["run_id"], "run-123")
         self.assertEqual(api.last_written_run_id, "run-123")
+
+    def test_cmd_run_persists_run_record_before_monitor_setup(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        api.start_run_monitor = lambda **kwargs: (_ for _ in ()).throw(SystemExit("monitor boom"))
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="codex-cli",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            with io.StringIO() as buf, contextlib.redirect_stdout(buf):
+                handlers["run"](args)
+
+        self.assertIn("monitor boom", str(ctx.exception))
+        self.assertIsInstance(api.last_run_record, dict)
+        self.assertEqual(api.last_run_record["task_id"], "T1")
+        self.assertEqual(api.last_run_record["execution_phase"], "dispatch")
+        self.assertEqual(api.last_run_record["monitor_status"], "pending-monitor-setup")
+        self.assertTrue(str(api.last_written_run_id or "").strip())
+        placeholder = next(
+            item for item in api.run_record_history
+            if item.get("execution_step") == "backend-dispatch-started"
+        )
+        self.assertEqual(placeholder["result"]["status"], "dispatching")
+        self.assertEqual(placeholder["monitor_status"], "pending-monitor-setup")
+
+    def test_cmd_run_writes_placeholder_before_backend_returns(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="codex-cli",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        def _blocking_codex(**kwargs):
+            self.assertTrue(api.run_record_history)
+            placeholder = api.run_record_history[-1]
+            self.assertEqual(placeholder["execution_step"], "backend-dispatch-started")
+            self.assertEqual(placeholder["monitor_status"], "pending-monitor-setup")
+            self.assertEqual(placeholder["task_id"], "T1")
+            return {"backend": "codex-cli", "status": "ok", "summary": "completed", "result": {"payloads": []}}
+
+        api.run_codex_cli = _blocking_codex
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["execution_step"], "monitor-ready")
+        self.assertEqual(payload["monitor_status"], "active")
+
+    def test_cmd_run_replaces_provisional_run_record_when_dispatch_returns_run_id(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="acp",
+            agent="codex",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        def _spawn_ok(**kwargs):
+            api.spawn_calls += 1
+            return {"status": "accepted", "result": {"payloads": []}}
+
+        def _dispatch_effects(bundle: dict, result: dict, *, agent_id: str, runtime: str) -> dict:
+            api.persist_dispatch_calls += 1
+            return {"runtime": runtime, "kind": "dispatch", "run_id": "run-123", "session_key": "agent:codex:acp:abc"}
+
+        api.spawn_acp_session = _spawn_ok
+        api.persist_dispatch_side_effects = _dispatch_effects
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["run"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["run_id"], "run-123")
+        self.assertEqual(api.last_written_run_id, "run-123")
+        runs_dir = api.pm_dir_path() / "runs"
+        self.assertTrue((runs_dir / "run-123.json").exists())
+        provisional = [p for p in runs_dir.glob("*.json") if p.stem != "run-123"]
+        self.assertEqual(provisional, [])
 
     def test_cmd_run_reviewed_writes_pending_review_metadata(self) -> None:
         api = _FakeApi()
@@ -733,6 +876,259 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(payload["rerun_of_run_id"], "run-source")
         self.assertIn("Address the missing test coverage.", payload["message_preview"])
         self.assertNotEqual(payload["run_id"], "run-source")
+
+    def test_complete_blocks_when_managed_task_has_comments_but_no_run_record(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        api.comments.append(("guid-T1", "开工。\n执行方式：pm run-reviewed\nrun_id: run-missing\nmonitor_status: active"))
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            include_completed=False,
+            content="done",
+            content_file="",
+            file=[],
+            commit_url="",
+            skip_head_commit_url=True,
+            force_review_bypass=False,
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            handlers["complete"](args)
+
+        self.assertIn("managed execution history but no run record was found", str(ctx.exception))
+
+    def test_cmd_auto_review_writes_automatic_review_contract(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        run = {
+            "run_id": "run-review",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "backend": "codex-cli",
+            "review_required": True,
+            "review_status": "pending",
+            "attempt": 1,
+            "review_round": 1,
+            "result": {
+                "status": "completed",
+                "summary": "completed",
+                "payloads": [
+                    {
+                        "text": "Status: verified\nEvidence:\n- tests referenced\n- pytest -q -> 3 passed"
+                    }
+                ],
+            },
+        }
+        api.write_pm_run_record(run, run_id="run-review")
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="", reviewer="")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["auto_review"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "reviewed")
+        self.assertEqual(payload["review_status"], "passed")
+        self.assertEqual(payload["review_mode"], "automatic")
+        self.assertEqual(payload["review_contract"]["schema"], "pm.review.verdict.v2")
+        self.assertEqual(payload["review_executor"]["agent_id"], "reviewer")
+        self.assertEqual(payload["review_executor_result"]["parsed"]["verdict"], "pass")
+        self.assertEqual(payload["verification_status"], "verified")
+        self.assertIn("tests referenced", payload["verification_evidence"])
+        self.assertEqual(len(api.reviewer_runs), 1)
+
+    def test_cmd_review_manual_pass_without_evidence_is_not_promoted_to_pass(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        api.write_pm_run_record(
+            {
+                "run_id": "run-manual-no-evidence",
+                "task_id": "T1",
+                "task_guid": "guid-T1",
+                "review_required": True,
+                "review_status": "pending",
+                "attempt": 1,
+                "review_round": 1,
+            },
+            run_id="run-manual-no-evidence",
+        )
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            run_id="",
+            verdict="pass",
+            feedback="",
+            feedback_file="",
+            evidence=[],
+            evidence_file="",
+            reviewer="qa",
+        )
+
+        with io.StringIO() as buf, contextlib.redirect_stdout(buf):
+            code = handlers["review"](args)
+            payload = json.loads(buf.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["review_status"], "failed")
+        self.assertEqual(payload["verification_status"], "unverified")
+        self.assertIn("证据不足/未验证", payload["review_feedback"])
+
+    def test_cmd_auto_review_fails_closed_when_run_has_no_grounded_evidence(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        run = {
+            "run_id": "run-auto-no-evidence",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "backend": "codex-cli",
+            "review_required": True,
+            "review_status": "pending",
+            "attempt": 1,
+            "review_round": 1,
+            "result": {"status": "completed", "summary": "completed", "payloads": [{"text": "done"}]},
+        }
+        api.write_pm_run_record(run, run_id="run-auto-no-evidence")
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="", reviewer="")
+
+        with io.StringIO() as buf, contextlib.redirect_stdout(buf):
+            code = handlers["auto_review"](args)
+            payload = json.loads(buf.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "reviewed")
+        self.assertEqual(payload["review_status"], "failed")
+        self.assertEqual(payload["verification_status"], "unverified")
+        self.assertIn("证据不足/未验证", payload["review_feedback"])
+
+    def test_complete_blocks_passed_review_without_verified_evidence(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        api.write_pm_run_record(
+            {
+                "run_id": "run-pass-no-verified-evidence",
+                "task_id": "T1",
+                "task_guid": "guid-T1",
+                "backend": "codex-cli",
+                "session_key": "main",
+                "review_required": True,
+                "review_status": "passed",
+                "attempt": 1,
+                "review_round": 1,
+                "monitor": {"status": "active", "run_id": "run-pass-no-verified-evidence"},
+            },
+            run_id="run-pass-no-verified-evidence",
+        )
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            include_completed=False,
+            content="done",
+            content_file="",
+            file=[],
+            commit_url="",
+            skip_head_commit_url=True,
+            force_review_bypass=False,
+            repo_root="",
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            handlers["complete"](args)
+
+        self.assertIn("complete blocked", str(ctx.exception))
+
+    def test_cmd_monitor_advance_failed_review_triggers_rerun(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+
+        def _review_fail(**kwargs):
+            api.reviewer_runs.append(dict(kwargs))
+            return {
+                "backend": "codex-cli",
+                "status": "ok",
+                "summary": "completed",
+                "result": {
+                    "payloads": [
+                        {
+                            "text": json.dumps(
+                                {
+                                    "verdict": "fail",
+                                    "feedback": "Add missing verification.",
+                                    "summary": "Not ready.",
+                                    "confidence": "high",
+                                    "evidence": ["missing verification"],
+                                },
+                                ensure_ascii=False,
+                            ),
+                            "mediaUrl": None,
+                        }
+                    ]
+                },
+            }
+
+        api.run_reviewer_worker = _review_fail
+        run = {
+            "run_id": "run-monitor-fail",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "backend": "codex-cli",
+            "review_required": True,
+            "review_status": "pending",
+            "attempt": 1,
+            "review_round": 1,
+            "monitor": {"status": "active", "run_id": "run-monitor-fail", "cron_job_id": "job-run-monitor-fail"},
+            "result": {"status": "completed", "summary": "completed", "payloads": [{"text": "done"}]},
+        }
+        api.write_pm_run_record(run, run_id="run-monitor-fail")
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["monitor_advance"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "rerun-started")
+        self.assertEqual(payload["review"]["review_status"], "failed")
+        self.assertEqual(payload["rerun"]["review_status"], "pending")
+        self.assertEqual(payload["rerun"]["attempt"], 2)
+        self.assertEqual(payload["rerun"]["rerun_of_run_id"], "run-monitor-fail")
+
+    def test_cmd_monitor_advance_passed_review_completes_task(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        run = {
+            "run_id": "run-monitor-pass",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "backend": "codex-cli",
+            "review_required": True,
+            "review_status": "pending",
+            "attempt": 1,
+            "review_round": 1,
+            "monitor": {"status": "active", "run_id": "run-monitor-pass", "cron_job_id": "job-run-monitor-pass"},
+            "result": {
+                "status": "completed",
+                "summary": "completed",
+                "payloads": [{"text": "Status: verified\nEvidence:\n- tests referenced\n- pytest -q -> 3 passed"}],
+            },
+        }
+        api.write_pm_run_record(run, run_id="run-monitor-pass")
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["monitor_advance"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["review"]["review_status"], "passed")
+        self.assertEqual(payload["review"]["verification_status"], "verified")
+        self.assertEqual(payload["complete"]["verification_status"], "verified")
+        self.assertEqual(payload["complete"]["monitor_stop"]["status"], "stopped")
+        self.assertEqual(api.last_written_run_id, "run-monitor-pass")
 
 
 if __name__ == "__main__":
