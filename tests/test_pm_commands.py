@@ -142,7 +142,7 @@ class _FakeApi:
                                 "feedback": "",
                                 "summary": "Looks ready.",
                                 "confidence": "high",
-                                "evidence": ["tests referenced"],
+                                "evidence": ["pytest -q -> 3 passed"],
                             },
                             ensure_ascii=False,
                         ),
@@ -915,7 +915,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
                 "summary": "completed",
                 "payloads": [
                     {
-                        "text": "Status: verified\nEvidence:\n- tests referenced\n- pytest -q -> 3 passed"
+                        "text": "Status: verified\nEvidence:\n- pytest -q -> 3 passed"
                     }
                 ],
             },
@@ -936,7 +936,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(payload["review_executor"]["agent_id"], "reviewer")
         self.assertEqual(payload["review_executor_result"]["parsed"]["verdict"], "pass")
         self.assertEqual(payload["verification_status"], "verified")
-        self.assertIn("tests referenced", payload["verification_evidence"])
+        self.assertIn("pytest -q -> 3 passed", payload["verification_evidence"])
         self.assertEqual(len(api.reviewer_runs), 1)
 
     def test_cmd_review_manual_pass_without_evidence_is_not_promoted_to_pass(self) -> None:
@@ -1111,7 +1111,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
             "result": {
                 "status": "completed",
                 "summary": "completed",
-                "payloads": [{"text": "Status: verified\nEvidence:\n- tests referenced\n- pytest -q -> 3 passed"}],
+                "payloads": [{"text": "Status: verified\nEvidence:\n- pytest -q -> 3 passed"}],
             },
         }
         api.write_pm_run_record(run, run_id="run-monitor-pass")
