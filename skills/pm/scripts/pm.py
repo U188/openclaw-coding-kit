@@ -1266,6 +1266,8 @@ def _bridge_session_status(session_key: str) -> dict[str, Any]:
         return {}
     try:
         payload = run_bridge("session_status", "", {"sessionKey": normalized_session_key, "model": "default"}, session_key="main")
+    except SystemExit as exc:  # pragma: no cover - bridge CLI can fail-closed on 5xx/non-JSON output
+        payload = {"ok": False, "error": str(exc), "sessionKey": normalized_session_key}
     except Exception as exc:  # pragma: no cover - defensive guard for bridge/runtime failures
         payload = {"ok": False, "error": str(exc), "sessionKey": normalized_session_key}
     error_text = str(payload.get("error") or "").strip()

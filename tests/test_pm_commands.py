@@ -99,6 +99,9 @@ class _FakeApi:
     def project_root_path(self, repo_root: str | None = None) -> Path:
         return self._repo_root
 
+    def repo_root(self) -> str:
+        return str(self._repo_root)
+
     def resolve_runtime_path(self, *, env_vars=(), path_lookup_names=(), fallback_paths=()):
         if tuple(path_lookup_names or ()) == ("codex",):
             return Path("/tmp/fake-codex")
@@ -207,10 +210,20 @@ class _FakeApi:
         return {}
 
     def get_task_record(self, task_id: str, include_completed: bool = False) -> dict:
-        return {"task_id": task_id, "guid": f"guid-{task_id}", "summary": f"{task_id} summary"}
+        return {
+            "task_id": task_id,
+            "guid": f"guid-{task_id}",
+            "summary": f"{task_id} summary",
+            "description": f"Repo：{self._repo_root}\n",
+        }
 
     def get_task_record_by_guid(self, task_guid: str) -> dict:
-        return {"task_id": "T1", "guid": task_guid, "summary": "T1 summary"}
+        return {
+            "task_id": "T1",
+            "guid": task_guid,
+            "summary": "T1 summary",
+            "description": f"Repo：{self._repo_root}\n",
+        }
 
     def list_task_comments(self, task_guid: str, limit: int = 20) -> list[dict]:
         relevant = [content for guid, content in self.comments if guid == task_guid]
@@ -570,7 +583,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
             task_id="T1",
             task_guid="",
             backend="openclaw",
-            agent="main",
+            agent="front",
             timeout=120,
             thinking="high",
             session_key="main",
@@ -589,6 +602,28 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertTrue(str(api.last_openclaw_kwargs.get("session_id") or "").startswith("pm-openclaw-"))
         self.assertNotEqual(api.last_openclaw_kwargs.get("session_id"), "")
         self.assertEqual(api.last_written_payload["backend"], "openclaw")
+
+    def test_cmd_run_blocks_agent_main_for_openclaw_backend(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        args = argparse.Namespace(
+            task_id="T1",
+            task_guid="",
+            backend="openclaw",
+            agent="main",
+            timeout=120,
+            thinking="high",
+            session_key="main",
+        )
+
+        with self.assertRaises(SystemExit) as ctx:
+            handlers["run"](args)
+
+        self.assertIn("refuses agent=main", str(ctx.exception))
+        self.assertEqual(api.openclaw_calls, 0)
+        self.assertIsNotNone(api.last_written_payload)
+        self.assertEqual(api.last_written_payload["monitor_status"], "dispatch-error")
+        self.assertEqual(api.last_written_payload["execution_step"], "backend-dispatch-failed")
 
     def test_cmd_run_reviewed_starts_monitor_for_acp(self) -> None:
         api = _FakeApi()
@@ -906,7 +941,7 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertIn("Address the missing test coverage.", payload["message_preview"])
         self.assertNotEqual(payload["run_id"], "run-source")
 
-    def test_complete_blocks_when_managed_task_has_comments_but_no_run_record(self) -> None:
+    def test_complete_repairs_managed_task_when_run_record_is_missing(self) -> None:
         api = _FakeApi()
         handlers = build_command_handlers(api)
         api.comments.append(("guid-T1", "开工。\n执行方式：pm run-reviewed\nrun_id: run-missing\nmonitor_status: active"))
@@ -919,13 +954,34 @@ class PmCommandsFallbackTest(unittest.TestCase):
             file=[],
             commit_url="",
             skip_head_commit_url=True,
-            force_review_bypass=False,
+            force_review_bypass=True,
         )
 
-        with self.assertRaises(SystemExit) as ctx:
-            handlers["complete"](args)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["complete"](args)
 
-        self.assertIn("managed execution history but no run record was found", str(ctx.exception))
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["repair"]["status"], "adopted")
+        self.assertEqual(payload["run_record"]["monitor_status"], "repaired")
+        self.assertEqual(api.last_run_record["repair"]["status"], "adopted")
+
+    def test_cmd_repair_run_adopts_missing_managed_run_record(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        api.comments.append(("guid-T1", "开工。\n执行方式：pm run\nrun_id: run-missing\nmonitor_status: active"))
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="run-missing")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["repair_run"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "repaired")
+        self.assertEqual(payload["run_id"], "run-missing")
+        self.assertEqual(payload["run_record"]["monitor_status"], "repaired")
 
     def test_cmd_auto_review_writes_automatic_review_contract(self) -> None:
         api = _FakeApi()
@@ -1158,6 +1214,75 @@ class PmCommandsFallbackTest(unittest.TestCase):
         self.assertEqual(payload["complete"]["verification_status"], "verified")
         self.assertEqual(payload["complete"]["monitor_stop"]["status"], "stopped")
         self.assertEqual(api.last_written_run_id, "run-monitor-pass")
+
+    def test_cmd_monitor_advance_non_review_terminal_completed_completes_task(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        run = {
+            "run_id": "run-monitor-no-review-pass",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "backend": "acp",
+            "review_required": False,
+            "review_status": "",
+            "attempt": 1,
+            "review_round": 1,
+            "worker_done_at": "2026-04-12T01:00:00Z",
+            "bridge_done_at": "2026-04-12T01:00:01Z",
+            "child_session_terminal_status": "completed",
+            "monitor": {"status": "active", "run_id": "run-monitor-no-review-pass", "cron_job_id": "job-run-monitor-no-review-pass"},
+            "result": {"status": "completed", "summary": "completed", "payloads": [{"text": "done"}]},
+            "status": "completed",
+            "summary": "completed",
+        }
+        api.write_pm_run_record(run, run_id="run-monitor-no-review-pass")
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["monitor_advance"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["terminal_run_state"], "completed")
+        self.assertEqual(payload["complete"]["monitor_stop"]["status"], "stopped")
+        self.assertEqual(api.last_written_run_id, "run-monitor-no-review-pass")
+
+    def test_cmd_monitor_advance_non_review_terminal_failed_stops_monitor(self) -> None:
+        api = _FakeApi()
+        handlers = build_command_handlers(api)
+        run = {
+            "run_id": "run-monitor-no-review-fail",
+            "task_id": "T1",
+            "task_guid": "guid-T1",
+            "backend": "acp",
+            "review_required": False,
+            "review_status": "",
+            "attempt": 1,
+            "review_round": 1,
+            "worker_done_at": "2026-04-12T01:00:00Z",
+            "bridge_done_at": "2026-04-12T01:00:01Z",
+            "child_session_terminal_status": "failed",
+            "monitor": {"status": "active", "run_id": "run-monitor-no-review-fail", "cron_job_id": "job-run-monitor-no-review-fail"},
+            "result": {"status": "failed", "summary": "failed", "error": "acpx exited with code 1"},
+            "status": "failed",
+            "summary": "failed",
+            "error": "acpx exited with code 1",
+        }
+        api.write_pm_run_record(run, run_id="run-monitor-no-review-fail")
+        args = argparse.Namespace(task_id="T1", task_guid="", run_id="")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = handlers["monitor_advance"](args)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["status"], "terminal-state-observed")
+        self.assertEqual(payload["terminal_run_state"], "failed")
+        self.assertEqual(payload["monitor_stop"]["status"], "stopped")
+        self.assertEqual(api.last_written_run_id, "run-monitor-no-review-fail")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,13 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+MANAGED_COMMENT_MARKERS = (
+    "执行方式：pm run",
+    "执行方式：pm run-reviewed",
+    "run_id:",
+    "monitor_status:",
+)
+
 CommandHandler = Callable[[argparse.Namespace], int]
 
 
@@ -117,29 +124,32 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         monitor = record.get("monitor") if isinstance(record, dict) else None
         return dict(monitor) if isinstance(monitor, dict) else None
 
-    def persist_monitor_on_run_record(run_record: dict[str, Any], monitor: dict[str, Any]) -> None:
+    def persist_monitor_on_run_record(run_record: dict[str, Any], monitor: dict[str, Any]) -> dict[str, Any]:
         normalized_run_id = str(run_record.get("run_id") or "").strip()
         if not normalized_run_id:
-            return
-        updated = dict(run_record)
+            return dict(run_record)
+        latest = api.load_run_record(normalized_run_id) if callable(getattr(api, "load_run_record", None)) else None
+        updated = dict(latest) if isinstance(latest, dict) else dict(run_record)
         updated["monitor"] = dict(monitor)
         updated["monitor_status"] = str(monitor.get("status") or "").strip()
         api.write_pm_run_record(updated, run_id=normalized_run_id)
+        return updated
 
-    def refresh_monitor_for_run_record(run_record: dict[str, Any] | None, *, persist: bool = True) -> dict[str, Any] | None:
+    def refresh_monitor_for_run_record(run_record: dict[str, Any] | None, *, persist: bool = True) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if not isinstance(run_record, dict):
-            return None
-        monitor = clone_monitor_state(run_record)
+            return None, None
+        effective_run = dict(run_record)
+        monitor = clone_monitor_state(effective_run)
         if not isinstance(monitor, dict):
-            return None
+            return None, effective_run
         refresh = getattr(api, "refresh_run_monitor", None)
         if not callable(refresh):
-            return monitor
-        refreshed = refresh(str(run_record.get("run_id") or "").strip(), write=persist)
+            return monitor, effective_run
+        refreshed = refresh(str(effective_run.get("run_id") or "").strip(), write=persist)
         refreshed_monitor = refreshed.get("monitor") if isinstance(refreshed, dict) else None
         if isinstance(refreshed_monitor, dict) and persist:
-            persist_monitor_on_run_record(run_record, refreshed_monitor)
-        return dict(refreshed_monitor) if isinstance(refreshed_monitor, dict) else monitor
+            effective_run = persist_monitor_on_run_record(effective_run, refreshed_monitor)
+        return (dict(refreshed_monitor) if isinstance(refreshed_monitor, dict) else monitor), effective_run
 
     def clone_run_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
         return dict(record) if isinstance(record, dict) else None
@@ -170,6 +180,94 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             return None
         path = api.pm_dir_path() / "runs" / f"{normalized_run_id}.json"
         return clone_run_record(api.load_json_file(path))
+
+    def task_repo_root(task: dict[str, Any] | None) -> str:
+        if not isinstance(task, dict):
+            return ""
+        description = str(task.get("description") or "")
+        match = re.search(r"^Repo：(.+)$", description, re.MULTILINE)
+        if match:
+            return str(match.group(1) or "").strip()
+        return str(task.get("repo_root") or "").strip()
+
+    def ensure_task_repo_binding(task: dict[str, Any] | None, *, command_name: str) -> None:
+        expected_repo = task_repo_root(task)
+        if not expected_repo:
+            return
+        repo_root_fn = getattr(api, "repo_root", None)
+        active_repo = str(repo_root_fn() if callable(repo_root_fn) else "").strip()
+        if active_repo and Path(active_repo).expanduser().resolve() != Path(expected_repo).expanduser().resolve():
+            raise SystemExit(
+                f"{command_name} blocked: task repo_root mismatch. task expects {expected_repo}, current repo is {active_repo}."
+            )
+
+    def comment_has_managed_markers(content: str) -> bool:
+        return any(marker in str(content or "") for marker in MANAGED_COMMENT_MARKERS)
+
+    def task_has_managed_comments(task_guid: str) -> bool:
+        list_comments = getattr(api, "list_task_comments", None)
+        if not callable(list_comments):
+            return False
+        try:
+            recent_comments = list_comments(task_guid, 20)
+        except Exception:
+            recent_comments = []
+        for item in recent_comments if isinstance(recent_comments, list) else []:
+            content = str(item.get("content") or "") if isinstance(item, dict) else ""
+            if comment_has_managed_markers(content):
+                return True
+        return False
+
+    def synthesize_repair_run_record(*, run_id: str, task_id: str, task_guid: str) -> dict[str, Any]:
+        now_iso = api.now_iso()
+        repo_root_fn = getattr(api, "repo_root", None)
+        repo_root = str(repo_root_fn() if callable(repo_root_fn) else "").strip()
+        monitor = {
+            "status": "repaired",
+            "status_reason": "adopted-from-managed-comment",
+            "task_id": task_id,
+            "task_guid": task_guid,
+            "run_id": run_id,
+            "backend": "repaired",
+            "repo_root": repo_root,
+            "started_at": now_iso,
+            "repaired_at": now_iso,
+        }
+        return {
+            "run_id": run_id,
+            "task_id": task_id,
+            "task_guid": task_guid,
+            "backend": "repaired",
+            "status": "adopted",
+            "summary": "adopted missing managed run record",
+            "review_required": review_required_default(),
+            "review_status": "pending" if review_required_default() else "",
+            "attempt": 1,
+            "review_round": 1,
+            "created_at": now_iso,
+            "started_at": now_iso,
+            "repair": {
+                "status": "adopted",
+                "source": "managed-comment",
+                "repaired_at": now_iso,
+            },
+            "result": {
+                "status": "unknown",
+                "summary": "repaired from task comment evidence",
+                "payloads": [],
+            },
+            "monitor": monitor,
+            "monitor_status": str(monitor.get("status") or "").strip(),
+        }
+
+    def repair_run_record(*, task_id: str, task_guid: str, run_id: str = "") -> tuple[dict[str, Any], str]:
+        normalized_run_id = str(run_id or "").strip() or next_generated_run_id(task_id or "task")
+        existing = load_run_record(normalized_run_id)
+        if isinstance(existing, dict):
+            return existing, normalized_run_id
+        repaired = synthesize_repair_run_record(run_id=normalized_run_id, task_id=task_id, task_guid=task_guid)
+        api.write_pm_run_record(repaired, run_id=normalized_run_id)
+        return repaired, normalized_run_id
 
     def delete_run_record(run_id: str) -> None:
         normalized_run_id = str(run_id or "").strip()
@@ -1533,6 +1631,12 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             )
             side_effects = api.persist_run_side_effects(bundle, result)
             return normalized, result, side_effects, warnings
+        if normalized == "openclaw" and str(agent_id or "").strip() == "main":
+            raise SystemExit(
+                "openclaw backend refuses agent=main for PM-managed runs. "
+                "Hint: this self-targets the live chat agent and can hang after dispatch; "
+                "use a dedicated front agent id or backend=acp/codex-cli instead."
+            )
         result = api.run_openclaw_agent(
             agent_id=agent_id,
             message=message,
@@ -2449,23 +2553,12 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 last_run = matched_run
         if not isinstance(last_run, dict):
             last_run = load_last_run_record(task_id=task_id_text, task_guid=guid)
-        managed_execution_expected = False
-        list_comments = getattr(api, "list_task_comments", None)
-        if callable(list_comments):
-            try:
-                recent_comments = list_comments(guid, 20)
-            except Exception:
-                recent_comments = []
-            for item in recent_comments if isinstance(recent_comments, list) else []:
-                content = str(item.get("content") or "") if isinstance(item, dict) else ""
-                if any(marker in content for marker in ("执行方式：pm run", "执行方式：pm run-reviewed", "run_id:", "monitor_status:")):
-                    managed_execution_expected = True
-                    break
+        managed_execution_expected = task_has_managed_comments(guid)
         if managed_execution_expected and not isinstance(last_run, dict):
-            raise SystemExit(
-                "pm complete blocked: task has managed execution history but no run record was found. "
-                "Repair the tracked run first, then retry complete."
-            )
+            last_run, repaired_run_id = repair_run_record(task_id=task_id_text, task_guid=guid)
+            if isinstance(last_run, dict):
+                last_run = dict(last_run)
+                last_run["repair_notice"] = "missing managed run record was adopted into a repaired PM run so monitor/review/complete can resume"
         latest_run_id = str((last_run or {}).get("run_id") or "").strip()
         latest_review_status = str((last_run or {}).get("review_status") or "").strip().lower()
         latest_review_feedback = str((last_run or {}).get("review_feedback") or "").strip()
@@ -2492,7 +2585,9 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             if verification_status != "verified":
                 detail = str(latest_verification.get("summary") or "").strip() or "latest passed review is not backed by verified evidence"
                 raise SystemExit(f"complete blocked: {detail}")
-        refreshed_monitor = refresh_monitor_for_run_record(last_run, persist=True)
+        refreshed_monitor, refreshed_run = refresh_monitor_for_run_record(last_run, persist=True)
+        if isinstance(refreshed_run, dict):
+            last_run = dict(refreshed_run)
         if isinstance(refreshed_monitor, dict) and isinstance(last_run, dict):
             last_run = dict(last_run)
             last_run["monitor"] = dict(refreshed_monitor)
@@ -2599,13 +2694,17 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             "verification_summary": verification_summary,
             "verification_evidence": verification_evidence,
             "verification_sources": verification_sources,
+            "repair": (finalized_run or last_run or {}).get("repair") or None,
+            "run_record": finalized_run or last_run,
             "context_path": str(api.pm_file("current-context.json")),
             "next_task": context.get("next_task"),
         }
 
     def cmd_monitor_status(args: argparse.Namespace) -> int:
         run_record, resolved_run_id = resolve_run_record(task_id=args.task_id, task_guid=args.task_guid, run_id=args.run_id)
-        monitor = refresh_monitor_for_run_record(run_record, persist=True)
+        monitor, refreshed_run = refresh_monitor_for_run_record(run_record, persist=True)
+        if isinstance(refreshed_run, dict):
+            run_record = dict(refreshed_run)
         if not isinstance(monitor, dict):
             return emit({"status": "not-found", "run_id": resolved_run_id, "monitor": None})
         return emit({"status": "ok", "run_id": resolved_run_id, "monitor": monitor, "monitor_status": str(monitor.get("status") or "").strip()})
@@ -2621,7 +2720,9 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
             task_guid=str((task or {}).get("guid") or args.task_guid or "").strip(),
             run_id=args.run_id,
         )
-        monitor = refresh_monitor_for_run_record(run_record, persist=True)
+        monitor, refreshed_run = refresh_monitor_for_run_record(run_record, persist=True)
+        if isinstance(refreshed_run, dict):
+            run_record = dict(refreshed_run)
         if isinstance(monitor, dict):
             run_record = dict(run_record)
             run_record["monitor"] = dict(monitor)
@@ -2747,6 +2848,52 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                     "monitor_status": str(completion.get("monitor_status") or "").strip(),
                 }
             )
+        terminal_run_state = str((run_record.get("child_session_terminal_status") or ((run_record.get("result") or {}) if isinstance(run_record.get("result"), dict) else {}).get("status") or run_record.get("status") or "")).strip().lower()
+        if not review_required and terminal_run_state in {"completed", "done", "ok", "success"} and run_is_ready_for_review(run_record):
+            complete_args = argparse.Namespace(
+                task_id=task_id,
+                task_guid=task_guid,
+                include_completed=False,
+                content=f"PM monitor observed terminal run state for {resolved_run_id}.",
+                content_file="",
+                file=[],
+                commit_url="",
+                skip_head_commit_url=True,
+                force_review_bypass=False,
+                repo_root="",
+            )
+            completion = complete_payload(complete_args)
+            return emit(
+                {
+                    "status": "completed",
+                    "run_id": resolved_run_id,
+                    "task_id": task_id,
+                    "complete": completion,
+                    "review_status": review_status,
+                    "monitor_status": str(completion.get("monitor_status") or "").strip(),
+                    "terminal_run_state": terminal_run_state,
+                }
+            )
+        if not review_required and terminal_run_state in {"failed", "error", "blocked", "needs-decision", "needs_decision", "cancelled", "canceled", "timed_out", "timeout"}:
+            monitor_stop = None
+            if isinstance(monitor, dict) and str(monitor.get("status") or "").strip() == "active":
+                monitor_stop = api.stop_run_monitor(resolved_run_id, reason=f"pm monitor-advance terminal state: {terminal_run_state}")
+                stopped_monitor = monitor_stop.get("monitor") if isinstance(monitor_stop, dict) else None
+                if isinstance(stopped_monitor, dict):
+                    run_record["monitor"] = dict(stopped_monitor)
+                    run_record["monitor_status"] = str(stopped_monitor.get("status") or "").strip()
+                    api.write_pm_run_record(run_record, run_id=resolved_run_id)
+            return emit(
+                {
+                    "status": "terminal-state-observed",
+                    "run_id": resolved_run_id,
+                    "task_id": task_id,
+                    "review_status": review_status,
+                    "monitor_status": str(((monitor_stop or {}).get("monitor") or {}).get("status") or (monitor or {}).get("status") or "").strip(),
+                    "terminal_run_state": terminal_run_state,
+                    "monitor_stop": monitor_stop,
+                }
+            )
         return emit(
             {
                 "status": "no-op",
@@ -2756,6 +2903,25 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
                 "monitor_status": str((monitor or {}).get("status") or "").strip(),
             }
         )
+
+
+    def cmd_repair_run(args: argparse.Namespace) -> int:
+        task = api.get_task_record_by_guid(args.task_guid) if args.task_guid else api.get_task_record(args.task_id, include_completed=True)
+        ensure_task_repo_binding(task, command_name="pm repair-run")
+        task_guid = str(task.get("guid") or args.task_guid or "").strip()
+        task_id = str(task.get("task_id") or args.task_id or "").strip()
+        if not task_guid:
+            raise SystemExit("pm repair-run requires a resolvable task guid")
+        if not task_has_managed_comments(task_guid):
+            raise SystemExit("pm repair-run blocked: no managed execution markers found on task comments")
+        run_record, repaired_run_id = repair_run_record(task_id=task_id, task_guid=task_guid, run_id=str(args.run_id or "").strip())
+        return emit({
+            "status": "repaired",
+            "task_id": task_id,
+            "task_guid": task_guid,
+            "run_id": repaired_run_id,
+            "run_record": run_record,
+        })
 
     def cmd_monitor_stop(args: argparse.Namespace) -> int:
         run_record, resolved_run_id = resolve_run_record(task_id=args.task_id, task_guid=args.task_guid, run_id=args.run_id)
@@ -2903,6 +3069,7 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         "monitor_status": cmd_monitor_status,
         "monitor_advance": cmd_monitor_advance,
         "monitor_stop": cmd_monitor_stop,
+        "repair_run": cmd_repair_run,
         "create": cmd_create,
         "start_work": cmd_start_work,
         "install_assets": cmd_install_assets,

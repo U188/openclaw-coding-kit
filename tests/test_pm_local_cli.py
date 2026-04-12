@@ -659,10 +659,67 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertTrue(run_record["worker_done_at"])
             self.assertTrue(run_record["bridge_done_at"])
 
+    def test_monitor_status_falls_back_to_local_agent_session_registry_when_bridge_call_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path, env = self._build_monitor_cli_harness(root)
+            openclaw_home = root / ".openclaw"
+            sessions_dir = openclaw_home / "agents" / "codex" / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            env["OPENCLAW_HOME"] = str(openclaw_home)
+
+            def run_ok(*args: str) -> dict:
+                proc = self._run_pm(root, config_path, env, *args)
+                return json.loads(proc.stdout)
+
+            run_ok("create", "--summary", "ACP local registry fallback after bridge failure")
+            first_run = run_ok("run-reviewed", "--task-id", "T1", "--backend", "acp", "--agent", "codex")
+            child_key = first_run["monitor"]["child_session_key"]
+
+            bridge_state = self._bridge_log(root)
+            bridge_state.setdefault("session_statuses", {})[child_key] = {
+                "_exit_code": 1,
+                "_stderr": "session_status bridge returned 500",
+            }
+            (root / ".pm" / "fake-bridge-log.json").write_text(json.dumps(bridge_state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            (sessions_dir / "sessions.json").write_text(
+                json.dumps(
+                    {
+                        child_key: {
+                            "status": "done",
+                            "endedAt": "2026-04-12T01:03:00Z",
+                            "sessionFile": str(sessions_dir / "child.jsonl"),
+                            "acp": {"state": "idle", "lastError": ""},
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            monitor_status = run_ok("monitor-status", "--run-id", first_run["run_id"])
+            self.assertEqual(monitor_status["monitor"]["child_session_bridge_status"], "bridged")
+            self.assertEqual(monitor_status["monitor"]["child_session_terminal_status"], "completed")
+
+            run_record = json.loads((root / ".pm" / "runs" / f"{first_run['run_id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_record["execution_step"], "worker-terminal-state-bridged")
+            self.assertEqual(run_record["child_session_terminal_status"], "completed")
+            self.assertEqual(run_record["status"], "completed")
+            self.assertEqual(run_record["summary"], "completed")
+            self.assertEqual(run_record["result"]["status"], "completed")
+            self.assertTrue(run_record["worker_done_at"])
+            self.assertTrue(run_record["bridge_done_at"])
+
     def test_monitor_advance_does_not_wait_forever_after_child_session_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path, env = self._build_monitor_cli_harness(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            review_cfg = config.setdefault("review", {})
+            review_cfg["backend"] = "openclaw"
+            config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
             def run_ok(*args: str) -> dict:
                 proc = self._run_pm(root, config_path, env, *args)
@@ -723,8 +780,9 @@ class PmLocalCliTest(unittest.TestCase):
             run_record_path.write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
 
             advanced = run_ok("monitor-advance", "--run-id", first_run["run_id"])
-            self.assertNotEqual(advanced["status"], "waiting-for-terminal-run-state")
-            self.assertIn(advanced["review_status"], {"failed", "fail"})
+            self.assertEqual(advanced["status"], "rerun-started")
+            self.assertIn(advanced["review"]["review_status"], {"failed", "fail"})
+            self.assertEqual(advanced["rerun"]["review_status"], "pending")
 
     def test_rerun_stops_previous_monitor_before_starting_new_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

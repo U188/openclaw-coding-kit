@@ -61,6 +61,11 @@ def main() -> int:
         statuses = state.setdefault("session_statuses", {})
         session_payload = statuses.get(session_key)
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        if isinstance(session_payload, dict) and int(session_payload.get("_exit_code") or 0):
+            message = str(session_payload.get("_stderr") or session_payload.get("error") or f"fake session_status bridge failure for {session_key}")
+            if message:
+                print(message, file=sys.stderr)
+            return int(session_payload.get("_exit_code") or 1)
         if isinstance(session_payload, dict):
             print(json.dumps(session_payload, ensure_ascii=False))
         else:
