@@ -3322,3 +3322,66 @@ def _find_latest_run_id(task_id: str) -> str | None:
         return None
     candidates.sort(reverse=True)
     return candidates[0][1]
+
+
+# ── Cron-driven monitor: poll all active runs ──
+
+def cmd_monitor_poll_all(args, api=None):
+    """Cron-friendly: scan all active runs and advance each one.
+
+    Designed to be called periodically (e.g., every 2-5 minutes) by
+    OpenClaw cron or system cron. For each active run:
+    1. Call monitor-advance to check/push state
+    2. If run reached terminal + review passed → auto-complete the task
+    3. If run reached terminal + review failed → log for next retry
+
+    Returns a summary of all runs processed.
+    """
+    import json
+    from pathlib import Path
+
+    if api is None:
+        from . import pm_commands as _self
+        api = _self
+
+    runs_dir = Path(".pm/runs")
+    if not runs_dir.exists():
+        print("[monitor-poll-all] No .pm/runs/ directory")
+        return {"processed": 0, "results": []}
+
+    results = []
+    for run_file in sorted(runs_dir.glob("*.json")):
+        try:
+            run_data = json.loads(run_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        run_id = run_data.get("run_id") or run_file.stem
+        status = run_data.get("status", "")
+        task_id = run_data.get("task_id", "")
+
+        # Skip already terminal runs
+        if status in ("completed", "done", "cancelled", "archived"):
+            continue
+
+        print(f"[monitor-poll-all] Processing run={run_id} task={task_id} status={status}")
+
+        # Advance
+        advance_args = _make_namespace(run_id=run_id)
+        try:
+            advance_result = cmd_monitor_advance(advance_args, api=api)
+        except Exception as e:
+            print(f"[monitor-poll-all] advance error for {run_id}: {e}")
+            results.append({"run_id": run_id, "task_id": task_id, "action": "advance_error", "error": str(e)})
+            continue
+
+        new_state = "unknown"
+        if isinstance(advance_result, dict):
+            new_state = advance_result.get("state") or advance_result.get("status", "unknown")
+
+        print(f"[monitor-poll-all] run={run_id} new_state={new_state}")
+        results.append({"run_id": run_id, "task_id": task_id, "state": new_state})
+
+    summary = {"processed": len(results), "results": results}
+    print(f"[monitor-poll-all] Done. Processed {len(results)} runs.")
+    return summary
