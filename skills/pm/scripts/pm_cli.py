@@ -210,8 +210,17 @@ def build_parser(*, handlers: dict[str, Any]) -> argparse.ArgumentParser:
     review.add_argument("--verdict", required=True, choices=["pass", "fail"])
     review.add_argument("--feedback", default="")
     review.add_argument("--feedback-file", default="")
+    review.add_argument("--evidence", action="append", default=[])
+    review.add_argument("--evidence-file", default="")
     review.add_argument("--reviewer", default="")
     review.set_defaults(func=handlers["review"])
+
+    auto_review = sub.add_parser("auto-review")
+    auto_review.add_argument("--task-id", default="")
+    auto_review.add_argument("--task-guid", default="")
+    auto_review.add_argument("--run-id", default="")
+    auto_review.add_argument("--reviewer", default="")
+    auto_review.set_defaults(func=handlers["auto_review"])
 
     rerun = sub.add_parser("rerun")
     rerun.add_argument("--task-id", default="")
@@ -230,12 +239,25 @@ def build_parser(*, handlers: dict[str, Any]) -> argparse.ArgumentParser:
     monitor_status.add_argument("--run-id", default="")
     monitor_status.set_defaults(func=handlers["monitor_status"])
 
+    monitor_advance = sub.add_parser("monitor-advance")
+    monitor_advance.add_argument("--task-id", default="")
+    monitor_advance.add_argument("--task-guid", default="")
+    monitor_advance.add_argument("--run-id", default="")
+    monitor_advance.set_defaults(func=handlers["monitor_advance"])
+
     monitor_stop = sub.add_parser("monitor-stop")
     monitor_stop.add_argument("--task-id", default="")
     monitor_stop.add_argument("--task-guid", default="")
     monitor_stop.add_argument("--run-id", default="")
     monitor_stop.add_argument("--reason", default="pm monitor-stop")
     monitor_stop.set_defaults(func=handlers["monitor_stop"])
+
+
+    repair_run = sub.add_parser("repair-run")
+    repair_run.add_argument("--task-id", default="")
+    repair_run.add_argument("--task-guid", default="")
+    repair_run.add_argument("--run-id", default="")
+    repair_run.set_defaults(func=handlers["repair_run"])
 
     create = sub.add_parser("create")
     create.add_argument("--summary", required=True)
@@ -341,4 +363,15 @@ def build_parser(*, handlers: dict[str, Any]) -> argparse.ArgumentParser:
     upload_attachments.add_argument("--include-completed", action="store_true", default=False)
     upload_attachments.add_argument("--file", action="append", default=[])
     upload_attachments.set_defaults(func=handlers["upload_attachments"])
+    # ── run-auto: full pipeline ──
+    p_run_auto = subparsers.add_parser("run-auto", help="Full-auto pipeline: dispatch → poll → review → complete/retry")
+    p_run_auto.add_argument("--task-id", required=True)
+    p_run_auto.add_argument("--backend", default="openclaw")
+    p_run_auto.add_argument("--agent", default="main")
+    p_run_auto.add_argument("--model", default=None)
+    p_run_auto.add_argument("--max-retries", type=int, default=3)
+    p_run_auto.add_argument("--poll-interval", type=int, default=30, help="Seconds between monitor-advance polls")
+    p_run_auto.add_argument("--max-poll-minutes", type=int, default=60)
+    p_run_auto.set_defaults(func=lambda args: _run_and_print(pm_commands.cmd_run_auto, args))
+
     return parser

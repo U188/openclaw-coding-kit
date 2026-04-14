@@ -79,7 +79,7 @@
           "settleAfterDoneMs": 4000,
           "replayCompletedWithinMs": 300000,
           "finalAssistantTailChars": 5000,
-          "deliverProgress": true,
+          "deliverProgress": false,
           "deliverCompletion": true
         }
       }

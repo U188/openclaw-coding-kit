@@ -60,8 +60,8 @@
       },
       "deliverProgress": {
         "type": "boolean",
-        "default": true,
-        "description": "Whether progress bridge updates should be delivered back through the parent session."
+        "default": false,
+        "description": "Whether progress bridge updates should be delivered back through the parent session. Disabled by default to avoid noisy parent-session chatter; enable only when you explicitly want in-chat progress relays."
       },
       "deliverCompletion": {
         "type": "boolean",

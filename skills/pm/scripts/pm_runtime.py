@@ -213,6 +213,12 @@ def run_openclaw_agent(
     bin_path_fn=openclaw_bin_path,
     env_fn=openclaw_env,
 ) -> dict[str, Any]:
+    if str(agent_id or "").strip() == "main":
+        raise SystemExit(
+            "openclaw backend refuses agent=main for PM-managed runs. "
+            "Hint: this self-targets the live chat agent and can hang after dispatch; "
+            "use a dedicated front agent id or backend=acp/codex-cli instead."
+        )
     effective_session_id = build_openclaw_session_id(session_id, agent_id=agent_id)
     effective_timeout = openclaw_wrapper_timeout(timeout_seconds)
     cmd = [

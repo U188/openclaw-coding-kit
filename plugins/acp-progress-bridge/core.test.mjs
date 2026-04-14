@@ -19,7 +19,7 @@ import {
 test("normalizeConfig keeps Codex-first defaults", () => {
   const config = normalizeConfig({});
   assert.deepEqual(config.childSessionPrefixes, ["agent:codex:acp:"]);
-  assert.equal(config.deliverProgress, true);
+  assert.equal(config.deliverProgress, false);
   assert.equal(config.deliverCompletion, true);
 });
 

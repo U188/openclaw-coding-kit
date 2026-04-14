@@ -73,7 +73,7 @@ class _FakeApi:
                 "mode": "cron",
                 "interval_minutes": 5,
                 "stalled_after_minutes": 20,
-                "notify_on_start": True,
+                "notify_on_start": False,
                 "notify_on_review_pending": True,
                 "notify_on_review_failed": True,
                 "auto_stop_on_complete": True,

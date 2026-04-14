@@ -3154,3 +3154,171 @@ def build_command_handlers(api: Any) -> dict[str, CommandHandler]:
         "attachments": cmd_attachments,
         "upload_attachments": cmd_upload_attachments,
     }
+
+
+# ── Full-auto pipeline: dispatch → monitor → auto-review → advance → complete ──
+
+def cmd_run_auto(args, api=None):
+    """Fully automated pipeline for a single task.
+
+    Steps:
+    1. run-reviewed (dispatch to backend, non-blocking)
+    2. Poll monitor-advance in a loop until terminal state
+    3. auto-review the finished run
+    4. If review passed → complete the task
+    5. If review failed → re-dispatch and loop back to step 2
+
+    Returns a summary dict with the final state.
+    """
+    import time
+
+    task_id = args.task_id
+    backend = getattr(args, "backend", None) or "openclaw"
+    agent = getattr(args, "agent", None) or "main"
+    model = getattr(args, "model", None)
+    max_retries = getattr(args, "max_retries", 3)
+    poll_interval = getattr(args, "poll_interval", 30)
+    max_poll_minutes = getattr(args, "max_poll_minutes", 60)
+
+    if api is None:
+        from . import pm_commands as _self
+        api = _self
+
+    summary = {
+        "task_id": task_id,
+        "backend": backend,
+        "attempts": 0,
+        "final_state": None,
+        "error": None,
+    }
+
+    for attempt in range(1, max_retries + 1):
+        summary["attempts"] = attempt
+        print(f"\n{'='*60}")
+        print(f"[run-auto] Attempt {attempt}/{max_retries} for {task_id}")
+        print(f"{'='*60}")
+
+        # Step 1: Dispatch
+        print(f"[run-auto] Step 1: Dispatching via run-reviewed (backend={backend})")
+        dispatch_args = _make_namespace(
+            task_id=task_id,
+            backend=backend,
+            agent=agent,
+            model=model,
+            skip_review=False,
+        )
+        try:
+            dispatch_result = cmd_run_reviewed(dispatch_args, api=api)
+        except Exception as e:
+            summary["error"] = f"dispatch failed: {e}"
+            summary["final_state"] = "dispatch_error"
+            print(f"[run-auto] Dispatch failed: {e}")
+            continue
+
+        # Extract run_id from dispatch result
+        run_id = None
+        if isinstance(dispatch_result, dict):
+            run_id = dispatch_result.get("run_id") or dispatch_result.get("runId")
+        if not run_id:
+            # Try to find latest run for this task
+            run_id = _find_latest_run_id(task_id)
+        if not run_id:
+            summary["error"] = "no run_id after dispatch"
+            summary["final_state"] = "dispatch_error"
+            print("[run-auto] No run_id found after dispatch")
+            continue
+
+        print(f"[run-auto] Dispatched, run_id={run_id}")
+
+        # Step 2: Poll until terminal
+        print(f"[run-auto] Step 2: Polling monitor-advance (interval={poll_interval}s, max={max_poll_minutes}m)")
+        deadline = time.monotonic() + max_poll_minutes * 60
+        terminal = False
+
+        while time.monotonic() < deadline:
+            time.sleep(poll_interval)
+            advance_args = _make_namespace(run_id=run_id)
+            try:
+                advance_result = cmd_monitor_advance(advance_args, api=api)
+            except Exception as e:
+                print(f"[run-auto] monitor-advance error: {e}")
+                continue
+
+            if isinstance(advance_result, dict):
+                state = advance_result.get("state") or advance_result.get("status", "")
+                print(f"[run-auto] monitor-advance state={state}")
+                if state in ("completed", "failed", "passed", "review_passed", "review_failed", "done"):
+                    terminal = True
+                    break
+
+        if not terminal:
+            print(f"[run-auto] Timed out after {max_poll_minutes}m, proceeding to auto-review anyway")
+
+        # Step 3: Auto-review
+        print(f"[run-auto] Step 3: Running auto-review for run_id={run_id}")
+        review_args = _make_namespace(run_id=run_id)
+        try:
+            review_result = cmd_auto_review(review_args, api=api)
+        except Exception as e:
+            summary["error"] = f"auto-review failed: {e}"
+            summary["final_state"] = "review_error"
+            print(f"[run-auto] auto-review error: {e}")
+            continue
+
+        verdict = "unknown"
+        if isinstance(review_result, dict):
+            verdict = review_result.get("verdict", review_result.get("status", "unknown"))
+        print(f"[run-auto] Review verdict: {verdict}")
+
+        # Step 4: Act on verdict
+        if verdict in ("passed", "pass", "bypassed"):
+            print(f"[run-auto] Step 4: Completing task {task_id}")
+            complete_args = _make_namespace(task_id=task_id)
+            try:
+                cmd_complete(complete_args, api=api)
+                summary["final_state"] = "completed"
+                print(f"[run-auto] ✅ Task {task_id} completed successfully")
+                return summary
+            except Exception as e:
+                summary["error"] = f"complete failed: {e}"
+                summary["final_state"] = "complete_error"
+                print(f"[run-auto] complete error: {e}")
+                return summary
+        else:
+            print(f"[run-auto] Review failed ({verdict}), will retry...")
+            summary["final_state"] = "review_failed"
+            continue
+
+    print(f"[run-auto] ❌ Exhausted {max_retries} attempts for {task_id}")
+    if not summary["final_state"]:
+        summary["final_state"] = "max_retries_exhausted"
+    return summary
+
+
+def _make_namespace(**kwargs):
+    """Create a minimal argparse-like namespace."""
+    import argparse
+    return argparse.Namespace(**kwargs)
+
+
+def _find_latest_run_id(task_id: str) -> str | None:
+    """Find the most recent run_id for a task from .pm/runs/."""
+    import json
+    from pathlib import Path
+    runs_dir = Path(".pm/runs")
+    if not runs_dir.exists():
+        return None
+    candidates = []
+    for p in runs_dir.iterdir():
+        if not p.is_file() or not p.name.endswith(".json"):
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("task_id") == task_id:
+                candidates.append((p.stat().st_mtime, data.get("run_id") or p.stem))
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]

@@ -149,7 +149,7 @@ python3 skills/pm/scripts/pm.py run-reviewed --task-id T1 --backend acp --agent 
 python3 skills/pm/scripts/pm.py monitor-status --task-id T1
 python3 skills/pm/scripts/pm.py review --task-id T1 --verdict fail --feedback "List the problems to fix" --reviewer qa
 python3 skills/pm/scripts/pm.py rerun --task-id T1 --backend acp --agent codex
-python3 skills/pm/scripts/pm.py review --task-id T1 --verdict pass --reviewer qa
+python3 skills/pm/scripts/pm.py review --task-id T1 --verdict pass --evidence "pytest -q -> 3 passed" --reviewer qa
 python3 skills/pm/scripts/pm.py monitor-stop --run-id run-acp-1 --reason "manual intervention"
 python3 skills/pm/scripts/pm.py complete --task-id T1 --content "done"
 ```
@@ -160,11 +160,13 @@ Behavior summary:
 - `run-reviewed` now starts one continuation monitor for supported PM backends (`acp`, `codex-cli`, `openclaw`) and persists deterministic monitor state in `.pm/monitors/<run_id>.json`
 - when `monitor.notify_on_start=true`, `run-reviewed` force-runs that monitor once immediately after writing the run record, so the first proactive report is mechanism-driven instead of waiting for the next interval
 - `review --verdict fail` records structured reviewer metadata plus feedback history and keeps completion blocked
+- `review --verdict pass` now requires explicit evidence (`--evidence` / `--evidence-file`), and PM records whether that verdict is actually verified or still unverified
 - `rerun` creates a new run record, carries the latest failed feedback into the coder handoff, increments `attempt` and `review_round`, links `rerun_of_run_id`, and stops the previous active monitor before starting the new one
 - `monitor-status` reads the explicit `--run-id` or resolves the requested task's latest run from `.pm/runs/*.json`, so operators can inspect cron metadata without opening JSON files manually
 - `monitor-stop` is idempotent and persists the final stop result back into monitor and run records
 - if the bridge cannot create the cron job, the run still succeeds and the monitor is persisted as `cron-error` instead of aborting the whole execution
-- `complete` now rejects `pending` and `failed` latest runs for the requested task unless you explicitly pass `--force-review-bypass`, which is also recorded in the run record; when that task's latest run has an active monitor and monitor auto-stop is enabled, `complete` also closes the cron automatically
+- automatic review and `monitor-advance` are now fail-closed: pass verdicts must cite grounded evidence already present on the PM collaboration surface, otherwise PM rewrites them to failed/unverified instead of trusting memory or vibes
+- `complete` now rejects `pending` and `failed` latest runs for the requested task unless you explicitly pass `--force-review-bypass`, and it also rejects `passed` runs whose verification state is not `verified`; bypass is recorded in the run record, and active monitors are still closed automatically when completion succeeds
 
 ## Quick Start
 

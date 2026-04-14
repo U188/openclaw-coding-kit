@@ -97,7 +97,7 @@ export function normalizeConfig(rawConfig) {
     settleAfterDoneMs: Math.max(1000, Number(rawConfig?.settleAfterDoneMs ?? 4000)),
     replayCompletedWithinMs: Math.max(0, Number(rawConfig?.replayCompletedWithinMs ?? 300000)),
     finalAssistantTailChars: Math.max(500, Number(rawConfig?.finalAssistantTailChars ?? 5000)),
-    deliverProgress: rawConfig?.deliverProgress !== false,
+    deliverProgress: rawConfig?.deliverProgress === true,
     deliverCompletion: rawConfig?.deliverCompletion !== false,
   };
 }

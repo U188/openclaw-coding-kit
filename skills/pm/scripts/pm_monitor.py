@@ -33,8 +33,8 @@ def validate_user_visible_followup_job(job: dict[str, Any]) -> dict[str, Any]:
     session_target = str(job.get("sessionTarget") or "").strip()
     if payload.get("kind") != "agentTurn":
         raise ValueError("user-visible follow-up jobs must use payload.kind=agentTurn")
-    if delivery.get("mode") != "announce":
-        raise ValueError("user-visible follow-up jobs must use delivery.mode=announce")
+    if delivery.get("mode") not in {"announce", "none"}:
+        raise ValueError("user-visible follow-up jobs must use delivery.mode=announce or delivery.mode=none")
     if not session_target or session_target == "main":
         raise ValueError("user-visible follow-up jobs must bind to isolated/current/session:* targets")
     return job
@@ -58,7 +58,8 @@ def build_user_visible_followup_job(
         raise ValueError("follow-up job name is required")
     if not normalized_message:
         raise ValueError("follow-up job message is required")
-    delivery: dict[str, Any] = {"mode": "announce", "bestEffort": bool(best_effort)}
+    delivery_mode = "announce" if normalized_channel or normalized_to else "none"
+    delivery: dict[str, Any] = {"mode": delivery_mode, "bestEffort": bool(best_effort)}
     normalized_channel = str(channel or "").strip()
     normalized_to = str(to or "").strip()
     if normalized_channel:
@@ -121,7 +122,7 @@ def build_monitor_state(
             "source_of_truth": [str(run_record_path), str(monitor_path)],
         },
         "reporting_contract": {
-            "delivery_mode": "announce",
+            "delivery_mode": "none",
             "payload_kind": "agentTurn",
             "session_target": "isolated",
         },
@@ -165,12 +166,13 @@ def build_monitor_prompt(state: dict[str, Any]) -> str:
             "This monitor exists to enforce continued task progression in code, not to preserve a one-off memory.",
             "Treat progress updates as non-terminal. Keep pushing until the run reaches a real terminal state.",
             "Terminal states are: completed, blocked, or needs-decision.",
-            "If the run is finalized/completed, remove the cron job and mark the monitor closed.",
-            "Review status is a manual review gate only. Do not invent or run an automatic review chain.",
-            "If review is failed, emit one rerun reminder.",
-            "If review is passed but task is not completed, emit one complete reminder.",
-            "If the run is active but stalled, emit one continue reminder.",
-            "This is a user-visible follow-up contract: do not silently downgrade it to a non-announcing reminder.",
+            "Use the deterministic PM state advancer instead of ad-hoc judgment.",
+            "Run: python3 skills/pm/scripts/pm.py monitor-advance --run-id " + str(state.get("run_id") or "").strip(),
+            "If the advancer reports a material state change, summarize that result to the user.",
+            "If the advancer reports waiting/no-op, reply with NO_REPLY.",
+            "If the run is finalized/completed, the advancer must remove the cron job and close the monitor.",
+            "Automatic review chain is enabled here: pending review should trigger auto-review, fail should trigger rerun, and pass should trigger completion.",
+            "This monitor should stay quiet by default; only explicit channel/to bindings should announce outward.",
             "The first tick is force-run immediately after monitor creation, so operators do not wait a full interval for the first report.",
             "If nothing changed, reply with NO_REPLY.",
         ]

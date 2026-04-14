@@ -222,7 +222,7 @@ python3 skills/pm/scripts/pm.py run-reviewed --task-id T1 --backend acp --agent 
 python3 skills/pm/scripts/pm.py monitor-status --task-id T1
 python3 skills/pm/scripts/pm.py review --task-id T1 --verdict fail --feedback "Add evidence" --reviewer qa
 python3 skills/pm/scripts/pm.py rerun --task-id T1 --backend acp --agent codex
-python3 skills/pm/scripts/pm.py review --task-id T1 --verdict pass --reviewer qa
+python3 skills/pm/scripts/pm.py review --task-id T1 --verdict pass --evidence "pytest -q -> 3 passed" --reviewer qa
 python3 skills/pm/scripts/pm.py complete --task-id T1 --content "done"
 ```
 

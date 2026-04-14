@@ -514,7 +514,7 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(first_run["monitor"]["status"], "active")
             self.assertEqual(first_run["monitor"]["watch_mode"], "child-session")
             self.assertTrue(first_run["monitor"]["cron_job_id"])
-            self.assertEqual(first_run["monitor"]["kickoff_status"], "sent")
+            self.assertEqual(first_run["monitor"]["kickoff_status"], "disabled")
             monitor_status = run_ok("monitor-status", "--task-id", "T1")
             self.assertEqual(monitor_status["monitor_status"], "active")
             self.assertEqual(monitor_status["monitor"]["status"], "active")
@@ -528,9 +528,7 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(job["sessionTarget"], "isolated")
             self.assertEqual(job["schedule"]["kind"], "every")
             self.assertTrue(any(item["tool"] == "cron" and item["action"] == "list" for item in bridge_calls))
-            cron_run = next(item for item in bridge_calls if item["tool"] == "cron" and item["action"] == "run")
-            self.assertEqual(cron_run["args"]["jobId"], first_run["monitor"]["cron_job_id"])
-            self.assertEqual(cron_run["args"]["runMode"], "force")
+            self.assertFalse(any(item["tool"] == "cron" and item["action"] == "run" for item in bridge_calls))
 
     def test_run_reviewed_creates_monitor_for_codex_cli_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -547,7 +545,7 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(first_run["monitor"]["status"], "active")
             self.assertEqual(first_run["monitor"]["watch_mode"], "run-record")
             self.assertTrue(first_run["monitor"]["cron_job_id"])
-            self.assertEqual(first_run["monitor"]["kickoff_status"], "sent")
+            self.assertEqual(first_run["monitor"]["kickoff_status"], "disabled")
             monitor_file = root / ".pm" / "monitors" / f"{first_run['run_id']}.json"
             self.assertTrue(monitor_file.exists())
             monitor_status = run_ok("monitor-status", "--run-id", first_run["run_id"])
@@ -570,7 +568,7 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(first_run["backend"], "openclaw")
             self.assertEqual(first_run["monitor"]["status"], "active")
             self.assertEqual(first_run["monitor"]["backend"], "openclaw")
-            self.assertEqual(first_run["monitor"]["kickoff_status"], "sent")
+            self.assertEqual(first_run["monitor"]["kickoff_status"], "disabled")
             monitor_status = run_ok("monitor-status", "--task-id", "T1")
             self.assertEqual(monitor_status["monitor"]["run_id"], first_run["run_id"])
             self.assertEqual(monitor_status["monitor"]["backend"], "openclaw")
@@ -590,7 +588,7 @@ class PmLocalCliTest(unittest.TestCase):
             self.assertEqual(first_run["monitor_status"], "cron-error")
             self.assertEqual(first_run["monitor"]["status"], "cron-error")
             self.assertEqual(first_run["monitor"]["status_reason"], "cron-job-missing")
-            self.assertEqual(first_run["monitor"]["kickoff_status"], "skipped-no-cron")
+            self.assertEqual(first_run["monitor"]["kickoff_status"], "disabled")
             monitor_status = run_ok("monitor-status", "--run-id", first_run["run_id"])
             self.assertEqual(monitor_status["monitor_status"], "cron-error")
             self.assertEqual(monitor_status["monitor"]["status"], "cron-error")
